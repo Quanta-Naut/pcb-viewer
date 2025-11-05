@@ -1,7 +1,19 @@
-import type { AnyCircuitElement, PcbSmtPadRotatedPill } from "circuit-json"
+import type {
+  AnyCircuitElement,
+  PcbNoteLine,
+  PcbNoteRect,
+  PcbNotePath,
+  PcbNoteText,
+  PcbNoteDimension,
+  PcbSmtPadRotatedPill,
+  PcbPanel,
+  PcbHole,
+  PcbHoleRotatedPill,
+} from "circuit-json"
 import { su } from "@tscircuit/circuit-json-util"
 import type { Primitive } from "./types"
 import { type Point, getExpandedStroke } from "./util/expand-stroke"
+import { distance } from "circuit-json"
 
 type MetaData = {
   _parent_pcb_component?: any
@@ -13,6 +25,12 @@ let globalPcbDrawingObjectCount = 0
 
 export const getNewPcbDrawingObjectId = (prefix: string) =>
   `${prefix}_${globalPcbDrawingObjectCount++}`
+
+const normalizePolygonPoints = (points: Point[] | undefined) =>
+  (points ?? []).map((point) => ({
+    x: distance.parse(point.x),
+    y: distance.parse(point.y),
+  }))
 
 export const convertElementToPrimitives = (
   element: AnyCircuitElement,
@@ -51,6 +69,59 @@ export const convertElementToPrimitives = (
     : undefined
 
   switch (element.type) {
+    case "pcb_panel": {
+      const { width, height } = element as PcbPanel
+      return [
+        {
+          _pcb_drawing_object_id: `line_${globalPcbDrawingObjectCount++}`,
+          pcb_drawing_type: "line",
+          x1: 0,
+          y1: 0,
+          x2: width,
+          y2: 0,
+          width: 1,
+          zoomIndependent: true,
+          layer: "board",
+          _element: element,
+        },
+        {
+          _pcb_drawing_object_id: `line_${globalPcbDrawingObjectCount++}`,
+          pcb_drawing_type: "line",
+          x1: 0,
+          y1: height,
+          x2: width,
+          y2: height,
+          width: 1,
+          zoomIndependent: true,
+          layer: "board",
+          _element: element,
+        },
+        {
+          _pcb_drawing_object_id: `line_${globalPcbDrawingObjectCount++}`,
+          pcb_drawing_type: "line",
+          x1: 0,
+          y1: 0,
+          x2: 0,
+          y2: height,
+          width: 1,
+          zoomIndependent: true,
+          layer: "board",
+          _element: element,
+        },
+        {
+          _pcb_drawing_object_id: `line_${globalPcbDrawingObjectCount++}`,
+          pcb_drawing_type: "line",
+          x1: width,
+          y1: 0,
+          x2: width,
+          y2: height,
+          width: 1,
+          zoomIndependent: true,
+          layer: "board",
+          _element: element,
+        },
+      ]
+    }
     case "pcb_board": {
       const { width, height, center, outline } = element
 
@@ -125,6 +196,8 @@ export const convertElementToPrimitives = (
       if (element.shape === "rect" || element.shape === "rotated_rect") {
         const { shape, x, y, width, height, layer, rect_border_radius } =
           element
+        const corner_radius =
+          (element as any).corner_radius ?? rect_border_radius ?? 0
 
         return [
           {
@@ -140,7 +213,7 @@ export const convertElementToPrimitives = (
             _parent_source_component,
             _source_port,
             ccw_rotation: (element as any).ccw_rotation,
-            roundness: rect_border_radius,
+            roundness: corner_radius,
           },
         ]
       } else if (element.shape === "circle") {
@@ -165,7 +238,7 @@ export const convertElementToPrimitives = (
           {
             _pcb_drawing_object_id: `polygon_${globalPcbDrawingObjectCount++}`,
             pcb_drawing_type: "polygon",
-            points,
+            points: normalizePolygonPoints(points),
             layer: layer || "top",
             _element: element,
             _parent_pcb_component,
@@ -209,6 +282,31 @@ export const convertElementToPrimitives = (
             _element: element,
             _parent_pcb_component,
             _parent_source_component,
+          },
+        ]
+      } else if (
+        element.hole_shape === "pill" ||
+        element.hole_shape === "rotated_pill"
+      ) {
+        const { x, y, hole_width, hole_height } = element
+
+        if (typeof hole_width !== "number" || typeof hole_height !== "number") {
+          return []
+        }
+
+        return [
+          {
+            _pcb_drawing_object_id: `pill_${globalPcbDrawingObjectCount++}`,
+            pcb_drawing_type: "pill",
+            x,
+            y,
+            w: hole_width,
+            h: hole_height,
+            layer: "drill",
+            _element: element,
+            _parent_pcb_component,
+            _parent_source_component,
+            ccw_rotation: (element as PcbHoleRotatedPill).ccw_rotation,
           },
         ]
       }
@@ -538,44 +636,53 @@ export const convertElementToPrimitives = (
     // The builder currently outputs these as smtpads and holes, so pcb_via isn't
     // used, but that maybe should be changed
     case "pcb_via": {
-      const { x, y, outer_diameter, hole_diameter, from_layer, to_layer } =
-        element
+      const { x, y, outer_diameter, hole_diameter } = element
+      const from_layer = element.from_layer
+      const to_layer = element.to_layer
+      const layers = element.layers
 
-      return [
-        {
+      // Support both old format (from_layer/to_layer) and new format (layers array)
+      const copperLayers: string[] = []
+      if (from_layer && to_layer) {
+        copperLayers.push(from_layer, to_layer)
+      } else if (layers && Array.isArray(layers)) {
+        copperLayers.push(...layers)
+      } else {
+        // Default to top and bottom if no layer info
+        copperLayers.push("top", "bottom")
+      }
+
+      // Create the outer copper circles on the via layers
+      // and the inner drill hole, similar to how pcb_plated_hole works
+      const primitives: Primitive[] = []
+
+      // Add outer copper circles for each layer
+      for (const layer of copperLayers) {
+        primitives.push({
           _pcb_drawing_object_id: `circle_${globalPcbDrawingObjectCount++}`,
           pcb_drawing_type: "circle",
           x,
           y,
           r: outer_diameter / 2,
-          layer: from_layer!,
+          layer,
           _element: element,
           _parent_pcb_component,
           _parent_source_component,
-        },
-        {
-          _pcb_drawing_object_id: `circle_${globalPcbDrawingObjectCount++}`,
-          _element: element,
-          pcb_drawing_type: "circle",
-          x,
-          y,
-          r: hole_diameter / 2,
-          layer: "drill",
-          _parent_pcb_component,
-          _parent_source_component,
-        },
-        {
-          _pcb_drawing_object_id: `circle_${globalPcbDrawingObjectCount++}`,
-          pcb_drawing_type: "circle",
-          x,
-          y,
-          r: outer_diameter / 2,
-          layer: to_layer!,
-          _element: element,
-          _parent_pcb_component,
-          _parent_source_component,
-        },
-      ]
+        })
+      }
+
+      // Add inner drill hole (drawn on top due to layer order)
+      primitives.push({
+        _pcb_drawing_object_id: `circle_${globalPcbDrawingObjectCount++}`,
+        pcb_drawing_type: "circle",
+        x,
+        y,
+        r: hole_diameter / 2,
+        layer: "drill",
+        _element: element,
+      })
+
+      return primitives
     }
 
     case "pcb_silkscreen_rect": {
@@ -661,6 +768,45 @@ export const convertElementToPrimitives = (
           squareCap: false,
           layer:
             element.layer === "bottom" ? "bottom_silkscreen" : "top_silkscreen",
+        },
+      ]
+    }
+    case "pcb_fabrication_note_rect": {
+      const rectElement = element as any
+
+      const layer =
+        rectElement.layer === "bottom"
+          ? "bottom_fabrication"
+          : "top_fabrication"
+
+      const hasStroke =
+        rectElement.has_stroke !== undefined
+          ? rectElement.has_stroke
+          : typeof rectElement.stroke_width === "number"
+            ? rectElement.stroke_width > 0
+            : undefined
+
+      return [
+        {
+          _pcb_drawing_object_id: getNewPcbDrawingObjectId(
+            "pcb_fabrication_note_rect",
+          ),
+          pcb_drawing_type: "rect",
+          x: rectElement.center.x,
+          y: rectElement.center.y,
+          w: rectElement.width,
+          h: rectElement.height,
+          roundness: rectElement.corner_radius,
+          layer,
+          stroke_width: rectElement.stroke_width,
+          is_filled: rectElement.is_filled,
+          has_stroke: hasStroke,
+          is_stroke_dashed: rectElement.is_stroke_dashed,
+          color: rectElement.color,
+          _element: element,
+          _parent_pcb_component,
+          _parent_source_component,
+          _source_port,
         },
       ]
     }
@@ -756,7 +902,7 @@ export const convertElementToPrimitives = (
                 "pcb_copper_pour_polygon",
               ),
               pcb_drawing_type: "polygon",
-              points: points,
+              points: normalizePolygonPoints(points),
               layer: layer,
               _element: element,
             },
@@ -779,7 +925,172 @@ export const convertElementToPrimitives = (
       }
       return []
     }
+    case "pcb_fabrication_note_dimension": {
+      const dimensionElement = element as any
+      const { from, to, text, font_size, arrow_size } = dimensionElement
 
+      const layer =
+        element.layer === "bottom" ? "bottom_fabrication" : "top_fabrication"
+
+      const primitives: Primitive[] = []
+      const arrowSize =
+        typeof arrow_size === "number" && !Number.isNaN(arrow_size)
+          ? arrow_size
+          : 1
+
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId(
+          "pcb_fabrication_note_dimension",
+        ),
+        pcb_drawing_type: "line",
+        x1: from.x,
+        y1: from.y,
+        x2: to.x,
+        y2: to.y,
+        width: 0.05,
+        squareCap: false,
+        layer,
+        _element: element,
+        _parent_pcb_component,
+        _parent_source_component,
+        _source_port,
+      })
+
+      const dx = to.x - from.x
+      const dy = to.y - from.y
+      const length = Math.sqrt(dx * dx + dy * dy) || 1
+      const unitX = dx / length
+      const unitY = dy / length
+
+      const arrowAngle = Math.PI / 6
+
+      const arrow1X1 =
+        from.x +
+        arrowSize *
+          (unitX * Math.cos(arrowAngle) - unitY * Math.sin(arrowAngle))
+      const arrow1Y1 =
+        from.y +
+        arrowSize *
+          (unitX * Math.sin(arrowAngle) + unitY * Math.cos(arrowAngle))
+      const arrow1X2 =
+        from.x +
+        arrowSize *
+          (unitX * Math.cos(-arrowAngle) - unitY * Math.sin(-arrowAngle))
+      const arrow1Y2 =
+        from.y +
+        arrowSize *
+          (unitX * Math.sin(-arrowAngle) + unitY * Math.cos(-arrowAngle))
+
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId(
+          "pcb_fabrication_note_dimension",
+        ),
+        pcb_drawing_type: "line",
+        x1: from.x,
+        y1: from.y,
+        x2: arrow1X1,
+        y2: arrow1Y1,
+        width: 0.05,
+        squareCap: false,
+        layer,
+        _element: element,
+        _parent_pcb_component,
+        _parent_source_component,
+        _source_port,
+      })
+
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId(
+          "pcb_fabrication_note_dimension",
+        ),
+        pcb_drawing_type: "line",
+        x1: from.x,
+        y1: from.y,
+        x2: arrow1X2,
+        y2: arrow1Y2,
+        width: 0.05,
+        squareCap: false,
+        layer,
+        _element: element,
+        _parent_pcb_component,
+        _parent_source_component,
+        _source_port,
+      })
+
+      const arrow2X1 =
+        to.x -
+        arrowSize *
+          (unitX * Math.cos(arrowAngle) - unitY * Math.sin(arrowAngle))
+      const arrow2Y1 =
+        to.y -
+        arrowSize *
+          (unitX * Math.sin(arrowAngle) + unitY * Math.cos(arrowAngle))
+      const arrow2X2 =
+        to.x -
+        arrowSize *
+          (unitX * Math.cos(-arrowAngle) - unitY * Math.sin(-arrowAngle))
+      const arrow2Y2 =
+        to.y -
+        arrowSize *
+          (unitX * Math.sin(-arrowAngle) + unitY * Math.cos(-arrowAngle))
+
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId(
+          "pcb_fabrication_note_dimension",
+        ),
+        pcb_drawing_type: "line",
+        x1: to.x,
+        y1: to.y,
+        x2: arrow2X1,
+        y2: arrow2Y1,
+        width: 0.05,
+        squareCap: false,
+        layer,
+        _element: element,
+        _parent_pcb_component,
+        _parent_source_component,
+        _source_port,
+      })
+
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId(
+          "pcb_fabrication_note_dimension",
+        ),
+        pcb_drawing_type: "line",
+        x1: to.x,
+        y1: to.y,
+        x2: arrow2X2,
+        y2: arrow2Y2,
+        width: 0.05,
+        squareCap: false,
+        layer,
+        _element: element,
+        _parent_pcb_component,
+        _parent_source_component,
+        _source_port,
+      })
+
+      if (text) {
+        primitives.push({
+          _pcb_drawing_object_id: getNewPcbDrawingObjectId(
+            "pcb_fabrication_note_dimension",
+          ),
+          pcb_drawing_type: "text",
+          x: (from.x + to.x) / 2,
+          y: (from.y + to.y) / 2,
+          layer,
+          align: "center",
+          text,
+          size: font_size,
+          _element: element,
+          _parent_pcb_component,
+          _parent_source_component,
+          _source_port,
+        })
+      }
+
+      return primitives
+    }
     case "pcb_fabrication_note_text": {
       return [
         {
@@ -839,7 +1150,7 @@ export const convertElementToPrimitives = (
               _pcb_drawing_object_id:
                 getNewPcbDrawingObjectId("pcb_cutout_polygon"),
               pcb_drawing_type: "polygon",
-              points: cutoutElement.points,
+              points: normalizePolygonPoints(cutoutElement.points as any),
               layer: "drill",
               _element: element,
               _parent_pcb_component,
@@ -851,6 +1162,234 @@ export const convertElementToPrimitives = (
           console.warn(`Unsupported pcb_cutout shape: ${cutoutElement.shape}`)
           return []
       }
+    }
+
+    case "pcb_note_line": {
+      const noteLineElement = element as PcbNoteLine
+      return [
+        {
+          _pcb_drawing_object_id: getNewPcbDrawingObjectId("pcb_note_line"),
+          pcb_drawing_type: "line",
+          x1: noteLineElement.x1,
+          y1: noteLineElement.y1,
+          x2: noteLineElement.x2,
+          y2: noteLineElement.y2,
+          width: noteLineElement.stroke_width ?? 0.1,
+          squareCap: false,
+          layer: "notes",
+          color: noteLineElement.color,
+          _element: element,
+          _parent_pcb_component,
+          _parent_source_component,
+        },
+      ]
+    }
+
+    case "pcb_note_rect": {
+      const noteRectElement = element as PcbNoteRect
+      return [
+        {
+          _pcb_drawing_object_id: getNewPcbDrawingObjectId("pcb_note_rect"),
+          pcb_drawing_type: "rect",
+          x: noteRectElement.center.x,
+          y: noteRectElement.center.y,
+          w: noteRectElement.width,
+          h: noteRectElement.height,
+          layer: "notes",
+          stroke_width: noteRectElement.stroke_width,
+          is_filled: noteRectElement.is_filled,
+          has_stroke: noteRectElement.has_stroke,
+          is_stroke_dashed: noteRectElement.is_stroke_dashed,
+          color: noteRectElement.color,
+          _element: element,
+          _parent_pcb_component,
+          _parent_source_component,
+        },
+      ]
+    }
+
+    case "pcb_note_path": {
+      const notePathElement = element as PcbNotePath
+      const { route, stroke_width } = notePathElement
+
+      return route
+        .slice(0, -1)
+        .map((point: any, index: number) => {
+          const nextPoint = route[index + 1]
+          return {
+            _pcb_drawing_object_id: getNewPcbDrawingObjectId("pcb_note_path"),
+            pcb_drawing_type: "line",
+            x1: point.x,
+            y1: point.y,
+            x2: nextPoint.x,
+            y2: nextPoint.y,
+            width: stroke_width ?? 0.1,
+            squareCap: false,
+            layer: "notes",
+            color: notePathElement.color,
+            _element: element,
+            _parent_pcb_component,
+            _parent_source_component,
+          } as Primitive & MetaData
+        })
+        .filter(Boolean)
+    }
+
+    case "pcb_note_text": {
+      const noteTextElement = element as PcbNoteText
+      return [
+        {
+          _pcb_drawing_object_id: getNewPcbDrawingObjectId("pcb_note_text"),
+          pcb_drawing_type: "text",
+          x: noteTextElement.anchor_position.x,
+          y: noteTextElement.anchor_position.y,
+          layer: "notes",
+          align: noteTextElement.anchor_alignment ?? "center",
+          text: noteTextElement.text || "",
+          size: noteTextElement.font_size,
+          color: noteTextElement.color,
+          _element: element,
+          _parent_pcb_component,
+          _parent_source_component,
+        },
+      ]
+    }
+
+    case "pcb_note_dimension": {
+      const dimensionElement = element as PcbNoteDimension
+      const { from, to, text, font_size, arrow_size } = dimensionElement
+      const primitives: Primitive[] = []
+
+      // Main line connecting from and to points
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId("pcb_note_dimension"),
+        pcb_drawing_type: "line",
+        x1: from.x,
+        y1: from.y,
+        x2: to.x,
+        y2: to.y,
+        width: 0.05,
+        squareCap: false,
+        color: dimensionElement.color,
+        layer: "notes",
+        _element: element,
+        _parent_pcb_component,
+        _parent_source_component,
+      })
+
+      // Calculate arrow direction
+      const dx = to.x - from.x
+      const dy = to.y - from.y
+      const length = Math.sqrt(dx * dx + dy * dy)
+      const unitX = dx / length
+      const unitY = dy / length
+
+      // Arrow at 'from' point
+      const arrowAngle = Math.PI / 6 // 30 degrees
+      const arrow1X1 =
+        from.x +
+        arrow_size *
+          (unitX * Math.cos(arrowAngle) - unitY * Math.sin(arrowAngle))
+      const arrow1Y1 =
+        from.y +
+        arrow_size *
+          (unitX * Math.sin(arrowAngle) + unitY * Math.cos(arrowAngle))
+      const arrow1X2 =
+        from.x +
+        arrow_size *
+          (unitX * Math.cos(-arrowAngle) - unitY * Math.sin(-arrowAngle))
+      const arrow1Y2 =
+        from.y +
+        arrow_size *
+          (unitX * Math.sin(-arrowAngle) + unitY * Math.cos(-arrowAngle))
+
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId("pcb_note_dimension"),
+        pcb_drawing_type: "line",
+        x1: from.x,
+        y1: from.y,
+        x2: arrow1X1,
+        y2: arrow1Y1,
+        width: 0.05,
+        squareCap: false,
+        layer: "notes",
+        _element: element,
+      })
+
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId("pcb_note_dimension"),
+        pcb_drawing_type: "line",
+        x1: from.x,
+        y1: from.y,
+        x2: arrow1X2,
+        y2: arrow1Y2,
+        width: 0.05,
+        squareCap: false,
+        layer: "notes",
+        _element: element,
+      })
+
+      // Arrow at 'to' point (pointing in opposite direction)
+      const arrow2X1 =
+        to.x -
+        arrow_size *
+          (unitX * Math.cos(arrowAngle) - unitY * Math.sin(arrowAngle))
+      const arrow2Y1 =
+        to.y -
+        arrow_size *
+          (unitX * Math.sin(arrowAngle) + unitY * Math.cos(arrowAngle))
+      const arrow2X2 =
+        to.x -
+        arrow_size *
+          (unitX * Math.cos(-arrowAngle) - unitY * Math.sin(-arrowAngle))
+      const arrow2Y2 =
+        to.y -
+        arrow_size *
+          (unitX * Math.sin(-arrowAngle) + unitY * Math.cos(-arrowAngle))
+
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId("pcb_note_dimension"),
+        pcb_drawing_type: "line",
+        x1: to.x,
+        y1: to.y,
+        x2: arrow2X1,
+        y2: arrow2Y1,
+        width: 0.05,
+        squareCap: false,
+        layer: "notes",
+        _element: element,
+      })
+
+      primitives.push({
+        _pcb_drawing_object_id: getNewPcbDrawingObjectId("pcb_note_dimension"),
+        pcb_drawing_type: "line",
+        x1: to.x,
+        y1: to.y,
+        x2: arrow2X2,
+        y2: arrow2Y2,
+        width: 0.05,
+        squareCap: false,
+        layer: "notes",
+        _element: element,
+      })
+
+      // Text label in the middle if provided
+      if (text) {
+        primitives.push({
+          _pcb_drawing_object_id:
+            getNewPcbDrawingObjectId("pcb_note_dimension"),
+          pcb_drawing_type: "text",
+          x: (from.x + to.x) / 2,
+          y: (from.y + to.y) / 2,
+          layer: "notes",
+          align: "center",
+          text,
+          size: font_size,
+          _element: element,
+        })
+      }
+
+      return primitives
     }
   }
 

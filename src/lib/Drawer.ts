@@ -11,6 +11,7 @@ import { scaleOnly } from "./util/scale-only"
 import { zIndexMap } from "./util/z-index-map"
 import { Rotation } from "circuit-json"
 import { BRepShape, Ring } from "lib/types"
+import colorParser from "color"
 
 export interface Aperture {
   shape: "circle" | "square"
@@ -35,7 +36,7 @@ export const LAYER_NAME_TO_COLOR = {
   top: colors.board.copper.f,
   inner1: colors.board.copper.in1,
   inner2: colors.board.copper.in2,
-
+  inner3: colors.board.copper.in3,
   inner4: colors.board.copper.in4,
   inner5: colors.board.copper.in5,
   inner6: colors.board.copper.in6,
@@ -54,23 +55,25 @@ export const LAYER_NAME_TO_COLOR = {
   top_fabrication: colors.board.f_fab,
   bottom_fabrication: colors.board.b_fab,
 
+  notes: colors.board.user_2,
+
   ...(colors.board as any),
 }
 
 export type LayerNameForColor = keyof typeof LAYER_NAME_TO_COLOR
 
 export const DEFAULT_DRAW_ORDER = [
-  "board",
+  "inner6",
+  "inner5",
+  "inner4",
+  "inner3",
+  "inner2",
+  "inner1",
+  "bottom",
+  "bottom_silkscreen",
   "top",
   "top_silkscreen",
-  "bottom_silkscreen",
-  "bottom",
-  "inner1",
-  "inner2",
-  "inner3",
-  "inner4",
-  "inner5",
-  "inner6",
+  "board",
 ] as const
 
 export const FILL_TYPES = {
@@ -439,10 +442,15 @@ export class Drawer {
     ctx.closePath()
     ctx.fill("evenodd")
 
-    // Draw the outline
+    // Draw the outline only if we have a non-zero stroke width.
+    // Calling ctx.stroke() with a zero width will re-use the previous
+    // stroke width which can cause the polygon to suddenly expand when
+    // other primitives (like hovered rectangles) change the aperture size.
     const lineWidth = scaleOnly(this.transform, this.aperture.size)
-    ctx.lineWidth = lineWidth
-    ctx.stroke()
+    if (lineWidth > 0) {
+      ctx.lineWidth = lineWidth
+      ctx.stroke()
+    }
   }
 
   /* NOTE: This is not gerber compatible */
@@ -482,23 +490,33 @@ export class Drawer {
           ? "bottom_silkscreen"
           : "",
     ])
-    const order = [
-      "drill",
-      "board",
+
+    const associatedSilkscreen =
+      foregroundLayer === "top"
+        ? "top_silkscreen"
+        : foregroundLayer === "bottom"
+          ? "bottom_silkscreen"
+          : undefined
+
+    const layersToShiftToTop = [
       foregroundLayer,
-      ...DEFAULT_DRAW_ORDER.filter((l) => l !== foregroundLayer),
+      ...(associatedSilkscreen ? [associatedSilkscreen] : []),
     ]
+
+    const order = [
+      ...DEFAULT_DRAW_ORDER.filter(
+        (l) => !layersToShiftToTop.includes(l as any),
+      ),
+      foregroundLayer,
+      "drill",
+      ...(associatedSilkscreen ? [associatedSilkscreen] : []),
+    ]
+
     order.forEach((layer, i) => {
       const canvas = canvasLayerMap[layer]
       if (!canvas) return
-      if (
-        (layer === "bottom_silkscreen" && foregroundLayer === "bottom") ||
-        (layer === "top_silkscreen" && foregroundLayer === "top")
-      ) {
-        canvas.style.zIndex = `${zIndexMap.topLayer}` // zIndexMap.topLayer
-      } else {
-        canvas.style.zIndex = `${zIndexMap.topLayer - i}`
-      }
+
+      canvas.style.zIndex = `${zIndexMap.topLayer - (order.length - i)}`
       canvas.style.opacity = opaqueLayers.has(layer) ? "1" : "0.5"
     })
   }
@@ -518,16 +536,15 @@ export class Drawer {
 
     if (mode === "add") {
       ctx.globalCompositeOperation = "source-over"
-      let colorString =
-        color?.[0] === "#" || color?.startsWith("rgb")
-          ? color
-          : (LAYER_NAME_TO_COLOR as any)[color?.toLowerCase()]
-            ? (LAYER_NAME_TO_COLOR as any)[color?.toLowerCase()]
-            : null
-      if (colorString === null) {
-        console.warn(`Color mapping for "${color}" not found`)
-        colorString = "white"
-      }
+      let colorString = LAYER_NAME_TO_COLOR[color.toLowerCase()]
+      if (!colorString)
+        try {
+          colorString = colorParser(color).rgb().toString()
+        } catch (error) {
+          console.warn(`Invalid color format: '${color}'`)
+          colorString = "white"
+        }
+
       ctx.fillStyle = colorString
       ctx.strokeStyle = colorString
     } else {
