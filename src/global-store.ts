@@ -1,7 +1,6 @@
 import {
   createStore as createZustandStore,
   useStore as useZustandStore,
-  UseBoundStore,
 } from "zustand"
 import { StoreContext } from "./components/ContextProviders"
 import type { LayerRef } from "circuit-json"
@@ -21,38 +20,47 @@ export interface State {
 
   in_edit_mode: boolean
   in_move_footprint_mode: boolean
-  in_draw_trace_mode: boolean
   is_mouse_over_container: boolean
   is_moving_component: boolean
-  is_drawing_trace: boolean
   is_showing_autorouting: boolean
   is_showing_drc_errors: boolean
+  is_showing_drc_warnings: boolean
 
   is_showing_multiple_traces_length: boolean
   is_showing_rats_nest: boolean
   is_showing_copper_pours: boolean
+  is_showing_courtyards: boolean
   is_showing_pcb_groups: boolean
   is_showing_group_anchor_offsets: boolean
   is_showing_solder_mask: boolean
+  is_showing_silkscreen: boolean
+  is_showing_fabrication_notes: boolean
+  is_showing_pcb_notes: boolean
   pcb_group_view_mode: "all" | "named_only"
 
   hovered_error_id: string | null
+  focused_error_id: string | null
 
   selectLayer: (layer: LayerRef) => void
-  setEditMode: (mode: "off" | "move_footprint" | "draw_trace") => void
+  setEditMode: (mode: "off" | "move_footprint") => void
   setIsMovingComponent: (is_moving: boolean) => void
-  setIsDrawingTrace: (is_drawing: boolean) => void
   setIsShowingRatsNest: (is_showing: boolean) => void
   setIsMouseOverContainer: (is_focused: boolean) => void
   setIsShowingAutorouting: (is_showing: boolean) => void
   setIsShowingMultipleTracesLength: (is_showing: boolean) => void
   setIsShowingDrcErrors: (is_showing: boolean) => void
+  setIsShowingDrcWarnings: (is_showing: boolean) => void
   setIsShowingCopperPours: (is_showing: boolean) => void
+  setIsShowingCourtyards: (is_showing: boolean) => void
   setIsShowingPcbGroups: (is_showing: boolean) => void
   setIsShowingGroupAnchorOffsets: (is_showing: boolean) => void
   setIsShowingSolderMask: (is_showing: boolean) => void
+  setIsShowingSilkscreen: (is_showing: boolean) => void
+  setIsShowingFabricationNotes: (is_showing: boolean) => void
+  setIsShowingPcbNotes: (is_showing: boolean) => void
   setPcbGroupViewMode: (mode: "all" | "named_only") => void
   setHoveredErrorId: (errorId: string | null) => void
+  setFocusedErrorId: (errorId: string | null) => void
 }
 
 export type StateProps = {
@@ -75,18 +83,21 @@ export const createStore = (
 
         in_edit_mode: false,
         in_move_footprint_mode: false,
-        in_draw_trace_mode: false,
 
         is_moving_component: false,
-        is_drawing_trace: false,
         is_mouse_over_container: false,
 
         is_showing_multiple_traces_length: false,
         is_showing_rats_nest: false,
         is_showing_autorouting: true,
         is_showing_drc_errors: true,
+        is_showing_drc_warnings: true,
         is_showing_copper_pours: getStoredBoolean(
           STORAGE_KEYS.IS_SHOWING_COPPER_POURS,
+          true,
+        ),
+        is_showing_courtyards: getStoredBoolean(
+          STORAGE_KEYS.IS_SHOWING_COURTYARDS,
           true,
         ),
         is_showing_pcb_groups: disablePcbGroups
@@ -94,11 +105,23 @@ export const createStore = (
           : getStoredBoolean(STORAGE_KEYS.IS_SHOWING_PCB_GROUPS, true),
         is_showing_group_anchor_offsets: getStoredBoolean(
           STORAGE_KEYS.IS_SHOWING_GROUP_ANCHOR_OFFSETS,
-          process.env.NODE_ENV !== "production",
+          false,
         ),
         is_showing_solder_mask: getStoredBoolean(
           STORAGE_KEYS.IS_SHOWING_SOLDER_MASK,
           false,
+        ),
+        is_showing_silkscreen: getStoredBoolean(
+          STORAGE_KEYS.IS_SHOWING_SILKSCREEN,
+          true,
+        ),
+        is_showing_fabrication_notes: getStoredBoolean(
+          STORAGE_KEYS.IS_SHOWING_FABRICATION_NOTES,
+          false,
+        ),
+        is_showing_pcb_notes: getStoredBoolean(
+          STORAGE_KEYS.IS_SHOWING_PCB_NOTES,
+          true,
         ),
         pcb_group_view_mode: disablePcbGroups
           ? "all"
@@ -108,6 +131,7 @@ export const createStore = (
             ) as "all" | "named_only"),
 
         hovered_error_id: null,
+        focused_error_id: null,
         ...initialState,
 
         selectLayer: (layer) => set({ selected_layer: layer }),
@@ -115,16 +139,12 @@ export const createStore = (
           set({
             in_edit_mode: mode !== "off",
             in_move_footprint_mode: mode === "move_footprint",
-            in_draw_trace_mode: mode === "draw_trace",
             is_moving_component: false,
-            is_drawing_trace: false,
           }),
         setIsShowingRatsNest: (is_showing) =>
           set({ is_showing_rats_nest: is_showing }),
         setIsMovingComponent: (is_moving) =>
           set({ is_moving_component: is_moving }),
-        setIsDrawingTrace: (is_drawing) =>
-          set({ is_drawing_trace: is_drawing }),
         setIsMouseOverContainer: (is_focused) =>
           set({ is_mouse_over_container: is_focused }),
         setIsShowingMultipleTracesLength: (is_showing) =>
@@ -133,9 +153,15 @@ export const createStore = (
           set({ is_showing_autorouting: is_showing }),
         setIsShowingDrcErrors: (is_showing) =>
           set({ is_showing_drc_errors: is_showing }),
+        setIsShowingDrcWarnings: (is_showing) =>
+          set({ is_showing_drc_warnings: is_showing }),
         setIsShowingCopperPours: (is_showing) => {
           setStoredBoolean(STORAGE_KEYS.IS_SHOWING_COPPER_POURS, is_showing)
           set({ is_showing_copper_pours: is_showing })
+        },
+        setIsShowingCourtyards: (is_showing) => {
+          setStoredBoolean(STORAGE_KEYS.IS_SHOWING_COURTYARDS, is_showing)
+          set({ is_showing_courtyards: is_showing })
         },
         setIsShowingPcbGroups: (is_showing) => {
           if (disablePcbGroups) return
@@ -153,12 +179,28 @@ export const createStore = (
           setStoredBoolean(STORAGE_KEYS.IS_SHOWING_SOLDER_MASK, is_showing)
           set({ is_showing_solder_mask: is_showing })
         },
+        setIsShowingSilkscreen: (is_showing) => {
+          setStoredBoolean(STORAGE_KEYS.IS_SHOWING_SILKSCREEN, is_showing)
+          set({ is_showing_silkscreen: is_showing })
+        },
+        setIsShowingFabricationNotes: (is_showing) => {
+          setStoredBoolean(
+            STORAGE_KEYS.IS_SHOWING_FABRICATION_NOTES,
+            is_showing,
+          )
+          set({ is_showing_fabrication_notes: is_showing })
+        },
+        setIsShowingPcbNotes: (is_showing) => {
+          setStoredBoolean(STORAGE_KEYS.IS_SHOWING_PCB_NOTES, is_showing)
+          set({ is_showing_pcb_notes: is_showing })
+        },
         setPcbGroupViewMode: (mode) => {
           if (disablePcbGroups) return
           setStoredString(STORAGE_KEYS.PCB_GROUP_VIEW_MODE, mode)
           set({ pcb_group_view_mode: mode })
         },
         setHoveredErrorId: (errorId) => set({ hovered_error_id: errorId }),
+        setFocusedErrorId: (errorId) => set({ focused_error_id: errorId }),
       }) as const,
   )
 

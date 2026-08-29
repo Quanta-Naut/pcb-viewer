@@ -45,6 +45,7 @@ export interface PCBDrawingObject {
 
   is_mouse_over?: boolean
   is_in_highlighted_net?: boolean
+  is_hoverable?: boolean
 }
 
 export interface Line extends PCBDrawingObject {
@@ -102,6 +103,7 @@ export interface Circle extends PCBDrawingObject {
   y: number
   r: number
   mesh_fill?: boolean
+  is_filled?: boolean
 }
 
 export interface Oval extends PCBDrawingObject {

@@ -1,14 +1,20 @@
 import { pointToSegmentDistance } from "@tscircuit/math-utils"
-import type { AnyCircuitElement } from "circuit-json"
+import type { AnyCircuitElement, LayerRef } from "circuit-json"
 import { distance } from "circuit-json"
 import type { Primitive } from "lib/types"
 import { ifSetsMatchExactly } from "lib/util/if-sets-match-exactly"
-import React, { useState, useMemo } from "react"
+import type React from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useMeasure } from "react-use"
 import type { Matrix } from "transformation-matrix"
 import { applyToPoint, inverse } from "transformation-matrix"
+import {
+  BoardAnchorOffsetOverlay,
+  ComponentBoundingBoxOverlay,
+  GroupAnchorOffsetOverlay,
+  PanelAnchorOffsetOverlay,
+} from "./AnchorOffsetOverlay"
 import { ElementOverlayBox } from "./ElementOverlayBox"
-import { GroupAnchorOffsetOverlay } from "./GroupAnchorOffsetOverlay"
 
 const getPolygonBoundingBox = (
   points: ReadonlyArray<{ x: number; y: number }>,
@@ -62,15 +68,22 @@ const isPointInsidePolygon = (
   return isInside
 }
 
-const getPrimitivesUnderPoint = (
+export const getPrimitivesUnderPoint = (
   primitives: Primitive[],
   rwPoint: { x: number; y: number },
   transform: Matrix,
+  selectedLayer: LayerRef,
 ): Primitive[] => {
   const newMousedPrimitives: Primitive[] = []
 
   for (const primitive of primitives) {
     if (!primitive._element) continue
+    if (
+      primitive._element.type === "pcb_trace" &&
+      primitive.layer !== selectedLayer
+    ) {
+      continue
+    }
 
     // Handle PCB traces
     if ("x1" in primitive && primitive._element?.type === "pcb_trace") {
@@ -170,24 +183,34 @@ export const MouseElementTracker = ({
   children,
   transform,
   primitives,
+  selectedLayer,
   onMouseHoverOverPrimitives,
 }: {
   elements: AnyCircuitElement[]
   children: React.ReactNode
   transform?: Matrix
   primitives: Primitive[]
+  selectedLayer: LayerRef
   onMouseHoverOverPrimitives: (primitivesHoveredOver: Primitive[]) => void
 }) => {
   const [mousedPrimitives, setMousedPrimitives] = useState<Primitive[]>([])
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 })
   const [containerRef, { width, height }] = useMeasure<HTMLDivElement>()
 
+  useEffect(() => {
+    setMousedPrimitives([])
+    onMouseHoverOverPrimitives([])
+  }, [selectedLayer, onMouseHoverOverPrimitives])
+
   const highlightedPrimitives = useMemo(() => {
     const highlightedPrimitives: HighlightedPrimitive[] = []
+
     for (const primitive of mousedPrimitives) {
       if (primitive._element?.type === "pcb_via") continue
       if (primitive._element?.type === "pcb_component") continue
       if (primitive?.layer === "drill") continue
+      if (primitive?.is_hoverable === false) continue
+
       let basePoint: { x: number; y: number } | null = null
       let w = 0
       let h = 0
@@ -208,6 +231,13 @@ export const MouseElementTracker = ({
         basePoint = boundingBox.center
         w = boundingBox.width
         h = boundingBox.height
+      } else if (primitive.pcb_drawing_type === "line") {
+        basePoint = {
+          x: (primitive.x1 + primitive.x2) / 2,
+          y: (primitive.y1 + primitive.y2) / 2,
+        }
+        w = Math.abs(primitive.x2 - primitive.x1)
+        h = Math.abs(primitive.y2 - primitive.y1)
       } else if ("x" in primitive && "y" in primitive) {
         basePoint = { x: primitive.x, y: primitive.y }
         w =
@@ -275,6 +305,7 @@ export const MouseElementTracker = ({
       primitives,
       rwPoint,
       transform,
+      selectedLayer,
     )
 
     if (
@@ -319,19 +350,43 @@ export const MouseElementTracker = ({
         highlightedPrimitives={highlightedPrimitives}
       />
       {transform && (
-        <GroupAnchorOffsetOverlay
-          elements={elements}
-          highlightedPrimitives={highlightedPrimitives}
-          transform={transform}
-          containerWidth={width}
-          containerHeight={height}
-        />
+        <>
+          <BoardAnchorOffsetOverlay
+            elements={elements}
+            highlightedPrimitives={highlightedPrimitives}
+            transform={transform}
+            containerWidth={width}
+            containerHeight={height}
+          />
+          <GroupAnchorOffsetOverlay
+            elements={elements}
+            highlightedPrimitives={highlightedPrimitives}
+            transform={transform}
+            containerWidth={width}
+            containerHeight={height}
+          />
+          <ComponentBoundingBoxOverlay
+            elements={elements}
+            highlightedPrimitives={highlightedPrimitives}
+            transform={transform}
+            containerWidth={width}
+            containerHeight={height}
+          />
+          <PanelAnchorOffsetOverlay
+            elements={elements}
+            highlightedPrimitives={highlightedPrimitives}
+            transform={transform}
+            containerWidth={width}
+            containerHeight={height}
+          />
+        </>
       )}
     </div>
   )
 }
 
 export type HighlightedPrimitive = {
+  _pcb_drawing_object_id: string
   x: number
   y: number
   w: number

@@ -1,34 +1,46 @@
+import type { ManualEditEvent } from "@tscircuit/props"
 import type { AnyCircuitElement } from "circuit-json"
 import { getFullConnectivityMapFromCircuitJson } from "circuit-json-to-connectivity-map"
 import type { GraphicsObject } from "graphics-debug"
+import { convertElementToPrimitives } from "lib/convert-element-to-primitive"
 import type { GridConfig, Primitive } from "lib/types"
 import { addInteractionMetadataToPrimitives } from "lib/util/addInteractionMetadataToPrimitives"
-import { useCallback, useMemo, useState } from "react"
+import {
+  buildErrorPreviewElementIndexes,
+  createTransformForBounds,
+  getErrorPreviewBounds,
+  getRelatedIdsForError,
+} from "lib/util/error-preview"
+import { findErrorElementById, getErrorId } from "lib/util/get-error-id"
+import {
+  animateTransform,
+  cancelTransformAnimation,
+} from "lib/util/transform-animation"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { Matrix } from "transformation-matrix"
-import { convertElementToPrimitives } from "lib/convert-element-to-primitive"
+import { useGlobalStore } from "../global-store"
 import { CanvasPrimitiveRenderer } from "./CanvasPrimitiveRenderer"
 import { DebugGraphicsOverlay } from "./DebugGraphicsOverlay"
-import { WarningGraphicsOverlay } from "./WarningGraphicsOverlay"
-import { DimensionOverlay } from "./DimensionOverlay"
+import { type BoundsSelection, DimensionOverlay } from "./DimensionOverlay"
 import { EditPlacementOverlay } from "./EditPlacementOverlay"
-import { EditTraceHintOverlay } from "./EditTraceHintOverlay"
 import { ErrorOverlay } from "./ErrorOverlay"
 import { MouseElementTracker } from "./MouseElementTracker"
 import { PcbGroupOverlay } from "./PcbGroupOverlay"
 import { RatsNestOverlay } from "./RatsNestOverlay"
 import { ToolbarOverlay } from "./ToolbarOverlay"
-import type { ManualEditEvent } from "@tscircuit/props"
-import { useGlobalStore } from "../global-store"
+import { WarningGraphicsOverlay } from "./WarningGraphicsOverlay"
 
 export interface CanvasElementsRendererProps {
   elements: AnyCircuitElement[]
   debugGraphics?: GraphicsObject | null
   transform?: Matrix
+  setTransform?: (transform: Matrix) => void
   width?: number
   height?: number
   grid?: GridConfig
   allowEditing: boolean
   focusOnHover?: boolean
+  onBoundsSelected?: (bounds: BoundsSelection) => void
   cancelPanDrag: () => void
   onCreateEditEvent: (event: ManualEditEvent) => void
   onModifyEditEvent: (event: Partial<ManualEditEvent>) => void
@@ -36,10 +48,18 @@ export interface CanvasElementsRendererProps {
 
 export const CanvasElementsRenderer = (props: CanvasElementsRendererProps) => {
   const { transform, elements } = props
-  const hoveredErrorId = useGlobalStore((state) => state.hovered_error_id)
-  const isShowingCopperPours = useGlobalStore(
-    (state) => state.is_showing_copper_pours,
-  )
+  const {
+    hoveredErrorId,
+    focusedErrorId,
+    isShowingCopperPours,
+    selectedLayer,
+  } = useGlobalStore((state) => ({
+    hoveredErrorId: state.hovered_error_id,
+    focusedErrorId: state.focused_error_id,
+    isShowingCopperPours: state.is_showing_copper_pours,
+    selectedLayer: state.selected_layer,
+  }))
+  const activeErrorId = focusedErrorId ?? hoveredErrorId
 
   const elementsToRender = useMemo(
     () =>
@@ -64,35 +84,89 @@ export const CanvasElementsRenderer = (props: CanvasElementsRendererProps) => {
     drawingObjectIdsWithMouseOver: new Set<string>(),
     primitiveIdsInMousedOverNet: [] as string[],
   })
+  const [hoveredComponentIds, setHoveredComponentIds] = useState<string[]>([])
+  const currentTransformRef = useRef<Matrix | null>(transform ?? null)
+  const zoomAnimationFrameRef = useRef<number | null>(null)
+
+  const elementIndexes = useMemo(
+    () => buildErrorPreviewElementIndexes(elements),
+    [elements],
+  )
 
   const errorRelatedIds = useMemo(() => {
-    if (!hoveredErrorId) return []
+    if (!activeErrorId) return []
 
     const errorElements = elements.filter((el): el is any =>
       el.type.includes("error"),
     )
 
-    const hoveredError = errorElements.find((el, index) => {
-      const errorId =
-        el.pcb_trace_error_id ||
-        `error_${index}_${el.error_type}_${el.message?.slice(0, 20)}`
-      return errorId === hoveredErrorId
+    const activeError = errorElements.find((el, index) => {
+      return getErrorId(el, index) === activeErrorId
     })
 
-    if (!hoveredError) return []
+    if (!activeError) return []
 
-    const relatedIds: string[] = []
+    return getRelatedIdsForError(activeError)
+  }, [activeErrorId, elements])
 
-    if (hoveredError.pcb_trace_id) {
-      relatedIds.push(hoveredError.pcb_trace_id)
+  useEffect(() => {
+    if (transform) {
+      currentTransformRef.current = transform
     }
+  }, [transform])
 
-    if (hoveredError.pcb_port_ids) {
-      relatedIds.push(...hoveredError.pcb_port_ids)
+  useEffect(() => {
+    return () => {
+      cancelTransformAnimation(zoomAnimationFrameRef.current)
     }
+  }, [])
 
-    return relatedIds
-  }, [hoveredErrorId, elements])
+  useEffect(() => {
+    if (!props.width || !props.height || !props.setTransform || !focusedErrorId)
+      return
+
+    const focusedError = findErrorElementById(elements, focusedErrorId)
+
+    if (!focusedError) return
+
+    const previewBounds = getErrorPreviewBounds({
+      error: focusedError,
+      indexes: elementIndexes,
+    })
+
+    if (!previewBounds) return
+
+    const startTransform = currentTransformRef.current ?? transform
+    if (!startTransform) return
+
+    const targetTransform = createTransformForBounds({
+      bounds: previewBounds,
+      width: props.width,
+      height: props.height,
+    })
+
+    cancelTransformAnimation(zoomAnimationFrameRef.current)
+
+    animateTransform({
+      startTransform,
+      endTransform: targetTransform,
+      durationMs: 420,
+      setAnimationFrameId: (animationFrameId) => {
+        zoomAnimationFrameRef.current = animationFrameId
+      },
+      onUpdate: (nextTransform) => {
+        currentTransformRef.current = nextTransform
+        props.setTransform?.(nextTransform)
+      },
+    })
+  }, [
+    focusedErrorId,
+    elements,
+    elementIndexes,
+    props.height,
+    props.setTransform,
+    props.width,
+  ])
 
   const primitives = useMemo(() => {
     const combinedPrimitiveIds = [
@@ -133,6 +207,26 @@ export const CanvasElementsRenderer = (props: CanvasElementsRendererProps) => {
         drawingObjectIdsWithMouseOver,
         primitiveIdsInMousedOverNet,
       })
+
+      const componentIds = primitivesHoveredOver
+        .map((primitive) => {
+          if (
+            primitive._parent_pcb_component?.type === "pcb_component" &&
+            primitive._parent_pcb_component.pcb_component_id
+          ) {
+            return primitive._parent_pcb_component.pcb_component_id
+          }
+          if (
+            primitive._element?.type === "pcb_component" &&
+            primitive._element.pcb_component_id
+          ) {
+            return primitive._element.pcb_component_id
+          }
+          return null
+        })
+        .filter((id): id is string => Boolean(id))
+
+      setHoveredComponentIds(Array.from(new Set(componentIds)))
     },
     [connectivityMap],
   )
@@ -142,6 +236,7 @@ export const CanvasElementsRenderer = (props: CanvasElementsRendererProps) => {
       elements={elementsToRender}
       transform={transform}
       primitives={primitivesWithoutInteractionMetadata}
+      selectedLayer={selectedLayer}
       onMouseHoverOverPrimitives={onMouseOverPrimitives}
     >
       <EditPlacementOverlay
@@ -152,46 +247,44 @@ export const CanvasElementsRenderer = (props: CanvasElementsRendererProps) => {
         onCreateEditEvent={props.onCreateEditEvent}
         onModifyEditEvent={props.onModifyEditEvent}
       >
-        <EditTraceHintOverlay
-          disabled={!props.allowEditing}
-          transform={transform}
-          soup={elements}
+        <DimensionOverlay
+          transform={transform!}
+          focusOnHover={props.focusOnHover}
+          primitives={primitivesWithoutInteractionMetadata}
+          onBoundsSelected={props.onBoundsSelected}
           cancelPanDrag={props.cancelPanDrag}
-          onCreateEditEvent={props.onCreateEditEvent as any}
-          onModifyEditEvent={props.onModifyEditEvent as any}
         >
-          <DimensionOverlay
-            transform={transform!}
-            focusOnHover={props.focusOnHover}
-            primitives={primitivesWithoutInteractionMetadata}
-          >
-            <ToolbarOverlay elements={elements}>
-              <ErrorOverlay transform={transform} elements={elements}>
-                <RatsNestOverlay transform={transform} soup={elements}>
-                  <PcbGroupOverlay transform={transform} elements={elements}>
-                    <DebugGraphicsOverlay
+          <ToolbarOverlay elements={elements}>
+            <ErrorOverlay transform={transform} elements={elements}>
+              <RatsNestOverlay transform={transform} soup={elements}>
+                <PcbGroupOverlay
+                  transform={transform}
+                  elements={elements}
+                  hoveredComponentIds={hoveredComponentIds}
+                >
+                  <DebugGraphicsOverlay
+                    transform={transform}
+                    debugGraphics={props.debugGraphics}
+                  >
+                    <WarningGraphicsOverlay
                       transform={transform}
-                      debugGraphics={props.debugGraphics}
+                      elements={elements}
                     >
-                      <WarningGraphicsOverlay
+                      <CanvasPrimitiveRenderer
                         transform={transform}
-                        elements={elements}
-                      >
-                        <CanvasPrimitiveRenderer
-                          transform={transform}
-                          primitives={primitives}
-                          width={props.width}
-                          height={props.height}
-                          grid={props.grid}
-                        />
-                      </WarningGraphicsOverlay>
-                    </DebugGraphicsOverlay>
-                  </PcbGroupOverlay>
-                </RatsNestOverlay>
-              </ErrorOverlay>
-            </ToolbarOverlay>
-          </DimensionOverlay>
-        </EditTraceHintOverlay>
+                        primitives={primitives}
+                        elements={elementsToRender}
+                        width={props.width}
+                        height={props.height}
+                        grid={props.grid}
+                      />
+                    </WarningGraphicsOverlay>
+                  </DebugGraphicsOverlay>
+                </PcbGroupOverlay>
+              </RatsNestOverlay>
+            </ErrorOverlay>
+          </ToolbarOverlay>
+        </DimensionOverlay>
       </EditPlacementOverlay>
     </MouseElementTracker>
   )

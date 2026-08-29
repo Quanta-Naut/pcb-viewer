@@ -1,13 +1,23 @@
-import { useEffect, useState, useCallback, useRef } from "react"
+import {
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  useLayoutEffect,
+} from "react"
 import { css } from "@emotion/css"
-import { type LayerRef, type PcbTraceError, all_layers } from "circuit-json"
+import { type LayerRef } from "circuit-json"
 import type { AnyCircuitElement } from "circuit-json"
+import { getCopperLayerRefsFromElements } from "lib/copper-layers"
 import { LAYER_NAME_TO_COLOR } from "lib/Drawer"
 import { useGlobalStore } from "../global-store"
 import packageJson from "../../package.json"
 import { useHotKey } from "hooks/useHotKey"
 import { zIndexMap } from "lib/util/z-index-map"
 import { useIsSmallScreen } from "hooks/useIsSmallScreen"
+import { useMobileTouch } from "hooks/useMobileTouch"
+import { ToolbarButton } from "./ToolbarButton"
+import { ToolbarErrorDropdown } from "./ToolbarErrorDropdown"
 
 interface Props {
   children?: React.ReactNode
@@ -17,15 +27,9 @@ interface Props {
 interface LayerButtonProps {
   name: string
   selected?: boolean
-  onClick: (e: React.MouseEvent<HTMLDivElement>) => void
-}
-
-interface ToolbarButtonProps {
-  children: React.ReactNode
-  isSmallScreen: boolean
-  onClick?: (e: React.MouseEvent<HTMLDivElement>) => void
-  style?: React.CSSProperties
-  onMouseLeave?: (e: React.MouseEvent<HTMLDivElement>) => void
+  onClick: (
+    e: React.MouseEvent<HTMLElement> | React.TouchEvent<HTMLElement>,
+  ) => void
 }
 
 interface CheckboxMenuItemProps {
@@ -41,6 +45,7 @@ interface RadioMenuItemProps {
 }
 
 export const LayerButton = ({ name, selected, onClick }: LayerButtonProps) => {
+  const { style: touchStyle, ...touchHandlers } = useMobileTouch(onClick)
   return (
     <div
       className={css`
@@ -54,7 +59,8 @@ export const LayerButton = ({ name, selected, onClick }: LayerButtonProps) => {
           background-color: rgba(255, 255, 255, 0.1);
         }
       `}
-      onClick={onClick}
+      {...touchHandlers}
+      style={touchStyle}
     >
       <span style={{ marginRight: 2, opacity: selected ? 1 : 0 }}>•</span>
       <span
@@ -70,48 +76,12 @@ export const LayerButton = ({ name, selected, onClick }: LayerButtonProps) => {
   )
 }
 
-export const ToolbarButton = ({
-  children,
-  isSmallScreen,
-  onClick,
-  ...props
-}: ToolbarButtonProps) => (
-  <div
-    {...props}
-    onClick={onClick}
-    onTouchEnd={(e: React.TouchEvent<HTMLDivElement>) => {
-      e.preventDefault()
-      e.stopPropagation()
-      if (onClick) {
-        onClick(e as any)
-      }
-    }}
-    style={{
-      backgroundColor: "#1F1F1F",
-      border: "1px solid #666",
-      margin: 0,
-      padding: 4,
-      paddingLeft: isSmallScreen ? 8 : 6,
-      paddingRight: isSmallScreen ? 8 : 6,
-      borderRadius: 2,
-      color: "#eee",
-      cursor: "pointer",
-      fontSize: 12,
-      height: "fit-content",
-      touchAction: "manipulation",
-      userSelect: "none",
-      whiteSpace: "nowrap",
-      ...props.style,
-    }}
-  >
-    {children}
-  </div>
-)
 const CheckboxMenuItem = ({
   label,
   checked,
   onClick,
 }: CheckboxMenuItemProps) => {
+  const { style: touchStyle, ...touchHandlers } = useMobileTouch(onClick)
   return (
     <div
       className={css`
@@ -128,15 +98,8 @@ const CheckboxMenuItem = ({
           background-color: rgba(255, 255, 255, 0.1);
         }
       `}
-      onClick={(e: React.MouseEvent<HTMLDivElement>) => {
-        e.stopPropagation()
-        onClick()
-      }}
-      onTouchEnd={(e: React.TouchEvent<HTMLDivElement>) => {
-        e.preventDefault()
-        e.stopPropagation()
-        onClick()
-      }}
+      {...touchHandlers}
+      style={touchStyle}
     >
       <input type="checkbox" checked={checked} onChange={() => {}} readOnly />
       <span style={{ color: "#eee" }}>{label}</span>
@@ -145,6 +108,7 @@ const CheckboxMenuItem = ({
 }
 
 const RadioMenuItem = ({ label, checked, onClick }: RadioMenuItemProps) => {
+  const { style: touchStyle, ...touchHandlers } = useMobileTouch(onClick)
   return (
     <div
       className={css`
@@ -161,15 +125,8 @@ const RadioMenuItem = ({ label, checked, onClick }: RadioMenuItemProps) => {
           background-color: rgba(255, 255, 255, 0.1);
         }
       `}
-      onClick={(e: React.MouseEvent<HTMLDivElement>) => {
-        e.stopPropagation()
-        onClick()
-      }}
-      onTouchEnd={(e: React.TouchEvent<HTMLDivElement>) => {
-        e.preventDefault()
-        e.stopPropagation()
-        onClick()
-      }}
+      {...touchHandlers}
+      style={touchStyle}
     >
       <input type="radio" checked={checked} onChange={() => {}} readOnly />
       <span style={{ color: "#eee" }}>{label}</span>
@@ -185,93 +142,91 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
     setIsMouseOverContainer,
     selectedLayer,
     selectLayer,
-    editModes,
     viewSettings,
-    setEditMode,
     setIsShowingRatsNest,
     setIsShowingMultipleTracesLength,
     setIsShowingAutorouting,
     setIsShowingDrcErrors,
+    setIsShowingDrcWarnings,
     setIsShowingCopperPours,
+    setIsShowingCourtyards,
     setIsShowingPcbGroups,
     setIsShowingGroupAnchorOffsets,
     setIsShowingSolderMask,
+    setIsShowingSilkscreen,
+    setIsShowingFabricationNotes,
+    setIsShowingPcbNotes,
     setPcbGroupViewMode,
     setHoveredErrorId,
+    setFocusedErrorId,
   } = useGlobalStore((s) => ({
     isMouseOverContainer: s.is_mouse_over_container,
     setIsMouseOverContainer: s.setIsMouseOverContainer,
     selectedLayer: s.selected_layer,
     selectLayer: s.selectLayer,
-    editModes: {
-      in_move_footprint_mode: s.in_move_footprint_mode,
-      in_draw_trace_mode: s.in_draw_trace_mode,
-    },
     viewSettings: {
       is_showing_rats_nest: s.is_showing_rats_nest,
       is_showing_multiple_traces_length: s.is_showing_multiple_traces_length,
       is_showing_autorouting: s.is_showing_autorouting,
       is_showing_drc_errors: s.is_showing_drc_errors,
+      is_showing_drc_warnings: s.is_showing_drc_warnings,
       is_showing_copper_pours: s.is_showing_copper_pours,
+      is_showing_courtyards: s.is_showing_courtyards,
       is_showing_pcb_groups: s.is_showing_pcb_groups,
       is_showing_group_anchor_offsets: s.is_showing_group_anchor_offsets,
       is_showing_solder_mask: s.is_showing_solder_mask,
+      is_showing_silkscreen: s.is_showing_silkscreen,
+      is_showing_fabrication_notes: s.is_showing_fabrication_notes,
+      is_showing_pcb_notes: s.is_showing_pcb_notes,
       pcb_group_view_mode: s.pcb_group_view_mode,
     },
-    setEditMode: s.setEditMode,
     setIsShowingRatsNest: s.setIsShowingRatsNest,
     setIsShowingMultipleTracesLength: s.setIsShowingMultipleTracesLength,
     setIsShowingAutorouting: s.setIsShowingAutorouting,
     setIsShowingDrcErrors: s.setIsShowingDrcErrors,
+    setIsShowingDrcWarnings: s.setIsShowingDrcWarnings,
     setIsShowingCopperPours: s.setIsShowingCopperPours,
+    setIsShowingCourtyards: s.setIsShowingCourtyards,
     setIsShowingPcbGroups: s.setIsShowingPcbGroups,
     setIsShowingGroupAnchorOffsets: s.setIsShowingGroupAnchorOffsets,
     setIsShowingSolderMask: s.setIsShowingSolderMask,
+    setIsShowingSilkscreen: s.setIsShowingSilkscreen,
+    setIsShowingFabricationNotes: s.setIsShowingFabricationNotes,
+    setIsShowingPcbNotes: s.setIsShowingPcbNotes,
     setPcbGroupViewMode: s.setPcbGroupViewMode,
     setHoveredErrorId: s.setHoveredErrorId,
+    setFocusedErrorId: s.setFocusedErrorId,
   }))
 
   const [isViewMenuOpen, setViewMenuOpen] = useState(false)
   const [isLayerMenuOpen, setLayerMenuOpen] = useState(false)
   const [isErrorsOpen, setErrorsOpen] = useState(false)
   const [measureToolArmed, setMeasureToolArmed] = useState(false)
-
-  const errorElementsRef = useRef<Map<number, HTMLElement>>(new Map())
-  const arrowElementsRef = useRef<Map<number, HTMLElement>>(new Map())
+  const [boundsToolArmed, setBoundsToolArmed] = useState(false)
 
   useEffect(() => {
     const arm = () => setMeasureToolArmed(true)
     const disarm = () => setMeasureToolArmed(false)
+    const armBounds = () => setBoundsToolArmed(true)
+    const disarmBounds = () => setBoundsToolArmed(false)
     window.addEventListener("arm-dimension-tool", arm)
     window.addEventListener("disarm-dimension-tool", disarm)
+    window.addEventListener("arm-bounds-tool", armBounds)
+    window.addEventListener("disarm-bounds-tool", disarmBounds)
     return () => {
       window.removeEventListener("arm-dimension-tool", arm)
       window.removeEventListener("disarm-dimension-tool", disarm)
+      window.removeEventListener("arm-bounds-tool", armBounds)
+      window.removeEventListener("disarm-bounds-tool", disarmBounds)
     }
   }, [])
 
-  const errorCount =
-    elements?.filter((e) => e.type.includes("error")).length ?? 0
-
-  const errorElements =
-    elements?.filter((el): el is PcbTraceError => el.type.includes("error")) ||
-    []
-
-  // Find the PCB board to get the number of layers
-  const pcbBoard = elements?.find((el) => el.type === "pcb_board") as any
-  const numLayers = pcbBoard?.num_layers || 2
-
-  // Filter layers based on PCB layer count
-  const availableLayers =
-    numLayers <= 2
-      ? ["top", "bottom"]
-      : [
-          "top",
-          ...Array.from({ length: numLayers - 2 }, (_, i) => `inner${i + 1}`),
-          "bottom",
-        ]
+  const availableLayers = getCopperLayerRefsFromElements(elements ?? [])
 
   const processedLayers = availableLayers
+
+  const hasRunInitialMouseCheck = useRef(false)
+  const hotkeyBoundaryRef = useRef<HTMLDivElement>(null)
 
   const hotKeyCallbacks = {
     "1": availableLayers[0]
@@ -298,28 +253,67 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
     "8": availableLayers[7]
       ? () => selectLayer(availableLayers[7] as LayerRef)
       : () => {},
+    "9": availableLayers[8]
+      ? () => selectLayer(availableLayers[8] as LayerRef)
+      : () => {},
+    "0": availableLayers[9]
+      ? () => selectLayer(availableLayers[9] as LayerRef)
+      : () => {},
   }
 
-  useHotKey("1", hotKeyCallbacks["1"])
-  useHotKey("2", hotKeyCallbacks["2"])
-  useHotKey("3", hotKeyCallbacks["3"])
-  useHotKey("4", hotKeyCallbacks["4"])
-  useHotKey("5", hotKeyCallbacks["5"])
-  useHotKey("6", hotKeyCallbacks["6"])
-  useHotKey("7", hotKeyCallbacks["7"])
-  useHotKey("8", hotKeyCallbacks["8"])
+  useHotKey("1", hotKeyCallbacks["1"], hotkeyBoundaryRef)
+  useHotKey("2", hotKeyCallbacks["2"], hotkeyBoundaryRef)
+  useHotKey("3", hotKeyCallbacks["3"], hotkeyBoundaryRef)
+  useHotKey("4", hotKeyCallbacks["4"], hotkeyBoundaryRef)
+  useHotKey("5", hotKeyCallbacks["5"], hotkeyBoundaryRef)
+  useHotKey("6", hotKeyCallbacks["6"], hotkeyBoundaryRef)
+  useHotKey("7", hotKeyCallbacks["7"], hotkeyBoundaryRef)
+  useHotKey("8", hotKeyCallbacks["8"], hotkeyBoundaryRef)
+  useHotKey("9", hotKeyCallbacks["9"], hotkeyBoundaryRef)
+  useHotKey("0", hotKeyCallbacks["0"], hotkeyBoundaryRef)
+
+  useLayoutEffect(() => {
+    if (hasRunInitialMouseCheck.current) return
+    hasRunInitialMouseCheck.current = true
+
+    const checkMousePosition = (e: MouseEvent) => {
+      if (hotkeyBoundaryRef.current) {
+        const rect = hotkeyBoundaryRef.current.getBoundingClientRect()
+        const isInside =
+          e.clientX >= rect.left &&
+          e.clientX <= rect.right &&
+          e.clientY >= rect.top &&
+          e.clientY <= rect.bottom
+
+        if (isInside) {
+          setIsMouseOverContainer(true)
+        }
+      }
+      document.removeEventListener("mousemove", checkMousePosition)
+    }
+
+    document.addEventListener("mousemove", checkMousePosition)
+    return () => {
+      document.removeEventListener("mousemove", checkMousePosition)
+    }
+  }, [setIsMouseOverContainer])
 
   const handleMouseEnter = useCallback(() => {
     setIsMouseOverContainer(true)
   }, [setIsMouseOverContainer])
+
+  const handleMouseMove = useCallback(() => {
+    if (!isMouseOverContainer) {
+      setIsMouseOverContainer(true)
+    }
+  }, [isMouseOverContainer, setIsMouseOverContainer])
 
   const handleMouseLeave = useCallback(() => {
     setIsMouseOverContainer(false)
     setLayerMenuOpen(false)
     setViewMenuOpen(false)
     setErrorsOpen(false)
-    setHoveredErrorId(null)
-  }, [setIsMouseOverContainer, setHoveredErrorId])
+  }, [setIsMouseOverContainer])
 
   const handleLayerMenuToggle = useCallback(() => {
     setLayerMenuOpen(!isLayerMenuOpen)
@@ -336,13 +330,9 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
     }
   }, [isErrorsOpen, setHoveredErrorId])
 
-  const handleEditTraceToggle = useCallback(() => {
-    setEditMode(editModes.in_draw_trace_mode ? "off" : "draw_trace")
-  }, [editModes.in_draw_trace_mode, setEditMode])
-
-  const handleMoveComponentToggle = useCallback(() => {
-    setEditMode(editModes.in_move_footprint_mode ? "off" : "move_footprint")
-  }, [editModes.in_move_footprint_mode, setEditMode])
+  const closeErrorsMenu = useCallback(() => {
+    setErrorsOpen(false)
+  }, [])
 
   const handleRatsNestToggle = useCallback(() => {
     setIsShowingRatsNest(!viewSettings.is_showing_rats_nest)
@@ -350,7 +340,14 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
 
   const handleMeasureToolClick = useCallback(() => {
     setMeasureToolArmed(true)
+    setBoundsToolArmed(false)
     window.dispatchEvent(new Event("arm-dimension-tool"))
+  }, [])
+
+  const handleBoundsToolClick = useCallback(() => {
+    setBoundsToolArmed(true)
+    setMeasureToolArmed(false)
+    window.dispatchEvent(new Event("arm-bounds-tool"))
   }, [])
 
   const handleViewMenuToggle = useCallback(() => {
@@ -360,11 +357,27 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
       setErrorsOpen(false)
     }
   }, [isViewMenuOpen])
+
+  const stopCanvasInteractionPropagation = useCallback(
+    (
+      event:
+        | React.MouseEvent<HTMLElement>
+        | React.TouchEvent<HTMLElement>
+        | React.WheelEvent<HTMLElement>
+        | React.PointerEvent<HTMLElement>,
+    ) => {
+      event.stopPropagation()
+    },
+    [],
+  )
+
   return (
     <div
+      ref={hotkeyBoundaryRef}
       style={{ position: "relative", zIndex: "999 !important" }}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
+      onMouseMove={handleMouseMove}
     >
       {children}
       <div
@@ -388,6 +401,13 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
         onTouchStart={(e) => e.stopPropagation()}
         onTouchEnd={(e) => e.stopPropagation()}
         onTouchMove={(e) => e.stopPropagation()}
+        onMouseDown={stopCanvasInteractionPropagation}
+        onMouseMove={stopCanvasInteractionPropagation}
+        onMouseUp={stopCanvasInteractionPropagation}
+        onPointerDown={stopCanvasInteractionPropagation}
+        onPointerMove={stopCanvasInteractionPropagation}
+        onPointerUp={stopCanvasInteractionPropagation}
+        onWheel={stopCanvasInteractionPropagation}
         style={{
           position: "absolute",
           opacity: isSmallScreen ? 1 : isMouseOverContainer ? 1 : 0,
@@ -401,6 +421,7 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
           color: "red",
           display: "flex",
           flexWrap: "wrap",
+          maxWidth: "550px",
           gap: 4,
           fontSize: 12,
           fontFamily: "sans-serif",
@@ -442,196 +463,15 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
             </div>
           )}
         </ToolbarButton>
-        <ToolbarButton
+        <ToolbarErrorDropdown
+          elements={elements}
+          isOpen={isErrorsOpen}
           isSmallScreen={isSmallScreen}
-          style={{
-            position: "relative",
-            ...(errorCount > 0 ? { color: "red" } : {}),
-          }}
-          onClick={handleErrorsToggle}
-        >
-          <div>{errorCount} errors</div>
-        </ToolbarButton>
-        {isErrorsOpen && errorCount > 0 && (
-          <div
-            style={{
-              position: "absolute",
-              top: "100%",
-              left: 0,
-              backgroundColor: "#2a2a2a",
-              border: "1px solid #666",
-              borderRadius: 4,
-              marginTop: 4,
-              zIndex: 1000,
-              minWidth: isSmallScreen ? "280px" : "400px",
-              maxWidth: isSmallScreen ? "90vw" : "600px",
-              maxHeight: "400px",
-              overflow: "auto",
-              boxShadow: "0 4px 12px rgba(0, 0, 0, 0.3)",
-            }}
-          >
-            {errorElements.map((e, i) => {
-              const errorId =
-                e.pcb_trace_error_id ||
-                `error_${i}_${e.error_type}_${e.message?.slice(0, 20)}`
-
-              return (
-                <div
-                  key={i}
-                  style={{
-                    borderBottom:
-                      i < errorElements.length - 1 ? "1px solid #444" : "none",
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 12,
-                      padding: "12px 16px",
-                      cursor: "pointer",
-                      backgroundColor: "#2a2a2a",
-                      transition: "background-color 0.2s ease",
-                      touchAction: "manipulation",
-                      userSelect: "none",
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.backgroundColor = "#333"
-                      setHoveredErrorId(errorId)
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.backgroundColor = "#2a2a2a"
-                      setHoveredErrorId(null)
-                    }}
-                    onTouchStart={(e) => {
-                      e.stopPropagation()
-                      e.currentTarget.style.backgroundColor = "#333"
-                      setHoveredErrorId(errorId)
-                    }}
-                    onTouchEnd={(e) => {
-                      e.stopPropagation()
-                      e.preventDefault()
-                      e.currentTarget.style.backgroundColor = "#2a2a2a"
-                      setHoveredErrorId(null)
-
-                      const errorElement = errorElementsRef.current.get(i)
-                      const arrow = arrowElementsRef.current.get(i)
-                      if (errorElement && arrow) {
-                        const isVisible = errorElement.style.display !== "none"
-                        errorElement.style.display = isVisible
-                          ? "none"
-                          : "block"
-                        arrow.style.transform = isVisible
-                          ? "rotate(90deg)"
-                          : "rotate(0deg)"
-                      }
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      const errorElement = errorElementsRef.current.get(i)
-                      const arrow = arrowElementsRef.current.get(i)
-                      if (errorElement && arrow) {
-                        const isVisible = errorElement.style.display !== "none"
-                        errorElement.style.display = isVisible
-                          ? "none"
-                          : "block"
-                        arrow.style.transform = isVisible
-                          ? "rotate(90deg)"
-                          : "rotate(0deg)"
-                      }
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontWeight: "bold",
-                        fontSize: isSmallScreen ? "12px" : "13px",
-                        whiteSpace: "nowrap",
-                        flexShrink: 0,
-                        color: "#ff6b6b",
-                        display: isSmallScreen ? "none" : "block",
-                      }}
-                    >
-                      {e.error_type}
-                    </div>
-                    <div
-                      style={{
-                        flex: 1,
-                        fontSize: isSmallScreen ? "12px" : "13px",
-                        color: "#ddd",
-                        lineHeight: 1.4,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {e.message}
-                    </div>
-                    <div
-                      ref={(el) => {
-                        if (el) arrowElementsRef.current.set(i, el)
-                      }}
-                      data-arrow-id={i}
-                      style={{
-                        color: "#888",
-                        fontSize: "16px",
-                        transform: "rotate(90deg)",
-                        transition: "transform 0.2s ease",
-                        flexShrink: 0,
-                      }}
-                    >
-                      ›
-                    </div>
-                  </div>
-                  <div
-                    ref={(el) => {
-                      if (el) errorElementsRef.current.set(i, el)
-                    }}
-                    data-error-id={i}
-                    style={{
-                      display: "none",
-                      padding: "12px 16px",
-                      backgroundColor: "#1a1a1a",
-                      borderTop: "1px solid #444",
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontSize: isSmallScreen ? "11px" : "12px",
-                        color: "#ccc",
-                        lineHeight: 1.5,
-                        wordWrap: "break-word",
-                        overflowWrap: "break-word",
-                        hyphens: "auto",
-                      }}
-                    >
-                      {e.message}
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
-        <ToolbarButton
-          isSmallScreen={isSmallScreen}
-          style={{}}
-          onClick={handleEditTraceToggle}
-        >
-          <div>
-            {editModes.in_draw_trace_mode ? "✖ " : ""}
-            Edit Traces
-          </div>
-        </ToolbarButton>
-        <ToolbarButton
-          isSmallScreen={isSmallScreen}
-          style={{}}
-          onClick={handleMoveComponentToggle}
-        >
-          <div>
-            {editModes.in_move_footprint_mode ? "✖ " : ""}
-            Move Components
-          </div>
-        </ToolbarButton>
+          onToggle={handleErrorsToggle}
+          onClose={closeErrorsMenu}
+          setHoveredErrorId={setHoveredErrorId}
+          setFocusedErrorId={setFocusedErrorId}
+        />
         <ToolbarButton
           isSmallScreen={isSmallScreen}
           style={{}}
@@ -649,6 +489,14 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
           onClick={handleMeasureToolClick}
         >
           <div>📏</div>
+        </ToolbarButton>
+
+        <ToolbarButton
+          isSmallScreen={isSmallScreen}
+          style={boundsToolArmed ? { backgroundColor: "#444" } : {}}
+          onClick={handleBoundsToolClick}
+        >
+          <div>Bounds</div>
         </ToolbarButton>
 
         <ToolbarButton
@@ -703,6 +551,15 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
                   }}
                 />
                 <CheckboxMenuItem
+                  label="Show DRC Warnings"
+                  checked={viewSettings.is_showing_drc_warnings}
+                  onClick={() => {
+                    setIsShowingDrcWarnings(
+                      !viewSettings.is_showing_drc_warnings,
+                    )
+                  }}
+                />
+                <CheckboxMenuItem
                   label="Show Copper Pours"
                   checked={viewSettings.is_showing_copper_pours}
                   onClick={() => {
@@ -712,10 +569,40 @@ export const ToolbarOverlay = ({ children, elements }: Props) => {
                   }}
                 />
                 <CheckboxMenuItem
+                  label="Show Courtyards"
+                  checked={viewSettings.is_showing_courtyards}
+                  onClick={() => {
+                    setIsShowingCourtyards(!viewSettings.is_showing_courtyards)
+                  }}
+                />
+                <CheckboxMenuItem
                   label="Show Solder Mask"
                   checked={viewSettings.is_showing_solder_mask}
                   onClick={() => {
                     setIsShowingSolderMask(!viewSettings.is_showing_solder_mask)
+                  }}
+                />
+                <CheckboxMenuItem
+                  label="Show Silkscreen"
+                  checked={viewSettings.is_showing_silkscreen}
+                  onClick={() => {
+                    setIsShowingSilkscreen(!viewSettings.is_showing_silkscreen)
+                  }}
+                />
+                <CheckboxMenuItem
+                  label="Show Fabrication Notes"
+                  checked={viewSettings.is_showing_fabrication_notes}
+                  onClick={() => {
+                    setIsShowingFabricationNotes(
+                      !viewSettings.is_showing_fabrication_notes,
+                    )
+                  }}
+                />
+                <CheckboxMenuItem
+                  label="Show PCB Notes"
+                  checked={viewSettings.is_showing_pcb_notes}
+                  onClick={() => {
+                    setIsShowingPcbNotes(!viewSettings.is_showing_pcb_notes)
                   }}
                 />
                 <CheckboxMenuItem

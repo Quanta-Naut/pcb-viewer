@@ -1,15 +1,38 @@
-import { drawGrid } from "lib/draw-grid"
-import { SuperGrid, toMMSI } from "react-supergrid"
-import React, { useEffect, useRef } from "react"
-import type { Matrix } from "transformation-matrix"
-import { drawPrimitives } from "lib/draw-primitives"
+import type { AnyCircuitElement, LayerRef, PcbRenderLayer } from "circuit-json"
 import { Drawer } from "lib/Drawer"
+import {
+  getCopperLayerRefsFromElements,
+  getCopperRenderLayer,
+  getOrderedCanvasLayers,
+} from "lib/copper-layers"
+import { drawCopperPourElementsForLayer } from "lib/draw-copper-pour"
+import { drawCourtyardElementsForLayer } from "lib/draw-courtyard"
+import { drawFabricationNoteElementsForLayer } from "lib/draw-fabrication-note"
+import { drawGrid } from "lib/draw-grid"
+import { drawPcbHoleElementsForLayer } from "lib/draw-hole"
+import { drawPcbBoardElements } from "lib/draw-pcb-board"
+import { drawPcbCopperTextElementsForLayer } from "lib/draw-pcb-copper-text"
+import { drawPcbCutoutElementsForLayer } from "lib/draw-pcb-cutout"
+import { drawPcbKeepoutElementsForLayer } from "lib/draw-pcb-keepout"
+import { drawPcbNoteElementsForLayer } from "lib/draw-pcb-note"
+import { drawPcbPanelElements } from "lib/draw-pcb-panel"
+import { drawPcbSmtPadElementsForLayer } from "lib/draw-pcb-smtpad"
+import { drawPcbTraceElementsForLayer } from "lib/draw-pcb-trace"
+import { drawPlatedHolePads } from "lib/draw-plated-hole"
+import { drawPrimitives } from "lib/draw-primitives"
+import { drawSilkscreenElementsForLayer } from "lib/draw-silkscreen"
+import { drawSoldermaskElementsForLayer } from "lib/draw-soldermask"
+import { drawPcbViaElementsForLayer } from "lib/draw-via"
+import { getPrimitivesForDrawer } from "lib/get-primitives-for-drawer"
 import type { GridConfig, Primitive } from "lib/types"
+import React, { useEffect, useRef } from "react"
+import { SuperGrid, toMMSI } from "react-supergrid"
+import type { Matrix } from "transformation-matrix"
 import { useGlobalStore } from "../global-store"
-import { all_layers } from "circuit-json"
 
 interface Props {
   primitives: Primitive[]
+  elements: AnyCircuitElement[]
   defaultUnit?: string
   transform?: Matrix
   grid?: GridConfig
@@ -17,29 +40,9 @@ interface Props {
   height?: number
 }
 
-const orderedLayers = [
-  "board",
-  "bottom_silkscreen",
-  "bottom",
-  "soldermask_bottom",
-  "top",
-  "soldermask_top",
-  "soldermask_with_copper_bottom",
-  "soldermask_with_copper_top",
-  "top_silkscreen",
-  "inner1",
-  "inner2",
-  "inner3",
-  "inner4",
-  "inner5",
-  "inner6",
-  "drill",
-  "notes",
-  "other",
-]
-
 export const CanvasPrimitiveRenderer = ({
   primitives,
+  elements,
   transform,
   grid,
   width = 500,
@@ -47,38 +50,325 @@ export const CanvasPrimitiveRenderer = ({
 }: Props) => {
   const canvasRefs = useRef<Record<string, HTMLCanvasElement>>({})
   const selectedLayer = useGlobalStore((s) => s.selected_layer)
+  const isShowingCopperPours = useGlobalStore((s) => s.is_showing_copper_pours)
   const isShowingSolderMask = useGlobalStore((s) => s.is_showing_solder_mask)
+  const isShowingFabricationNotes = useGlobalStore(
+    (s) => s.is_showing_fabrication_notes,
+  )
+  const isShowingPcbNotes = useGlobalStore((s) => s.is_showing_pcb_notes)
+  const isShowingCourtyards = useGlobalStore((s) => s.is_showing_courtyards)
+  const isShowingSilkscreen = useGlobalStore((s) => s.is_showing_silkscreen)
 
   useEffect(() => {
     if (!canvasRefs.current) return
     if (Object.keys(canvasRefs.current).length === 0) return
 
-    // Filter out null canvas refs and solder mask layers when disabled
-    const filteredCanvasRefs = Object.fromEntries(
+    // Keep all non-null canvas refs so hidden layers are still cleared.
+    const availableCanvasRefs = Object.fromEntries(
       Object.entries(canvasRefs.current).filter(([layer, canvas]) => {
         if (!canvas) return false
-        if (!isShowingSolderMask && layer.includes("soldermask")) {
-          return false
-        }
         return true
       }),
     )
 
-    if (Object.keys(filteredCanvasRefs).length === 0) return
+    if (Object.keys(availableCanvasRefs).length === 0) return
 
-    const drawer = new Drawer(filteredCanvasRefs)
+    const drawer = new Drawer(availableCanvasRefs)
     if (transform) drawer.transform = transform
     drawer.clear()
     drawer.foregroundLayer = selectedLayer
 
-    // Filter out solder mask primitives when solder mask is disabled
-    const filteredPrimitives = isShowingSolderMask
-      ? primitives
-      : primitives.filter((p) => !p.layer?.includes("soldermask"))
+    // Filter out solder mask and silkscreen primitives when disabled
+    // Also filter out SMT pad primitives since they're drawn with circuit-to-canvas
+    const filteredPrimitives = getPrimitivesForDrawer({
+      primitives,
+      isShowingSolderMask,
+      isShowingSilkscreen,
+      isShowingFabricationNotes,
+    })
 
     drawPrimitives(drawer, filteredPrimitives)
+
+    // Draw silkscreen elements using circuit-to-canvas
+    if (transform) {
+      // Draw plated holes using circuit-to-canvas (pads on copper layers, drills on drill layer)
+      const copperLayers: Array<{
+        canvas?: HTMLCanvasElement
+        layer: LayerRef
+        copperLayer: PcbRenderLayer
+      }> = getCopperLayerRefsFromElements(elements).map((layer) => ({
+        canvas: canvasRefs.current[layer],
+        layer,
+        copperLayer: getCopperRenderLayer(layer),
+      }))
+
+      // Draw PCB traces using circuit-to-canvas (on copper layers)
+      for (const { canvas, copperLayer } of copperLayers) {
+        if (!canvas) continue
+        drawPcbTraceElementsForLayer({
+          canvas,
+          elements,
+          layers: [copperLayer],
+          realToCanvasMat: transform,
+          primitives,
+          showCopperPours: isShowingCopperPours,
+        })
+      }
+
+      for (const { canvas, copperLayer } of copperLayers) {
+        if (!canvas) continue
+        drawPcbCopperTextElementsForLayer({
+          canvas,
+          elements,
+          layers: [copperLayer],
+          realToCanvasMat: transform,
+        })
+      }
+
+      for (const { canvas, copperLayer, layer } of copperLayers) {
+        if (!canvas) continue
+        drawPlatedHolePads({
+          canvas,
+          elements,
+          layers: [copperLayer],
+          realToCanvasMat: transform,
+          primitives,
+          drawSoldermask:
+            isShowingSolderMask && (layer === "top" || layer === "bottom"),
+        })
+      }
+
+      // Draw copper pours on every supported copper layer, including inners.
+      for (const { canvas, copperLayer } of copperLayers) {
+        if (!canvas) continue
+        drawCopperPourElementsForLayer({
+          canvas,
+          elements,
+          layers: [copperLayer],
+          realToCanvasMat: transform,
+        })
+      }
+
+      // Draw SMT pads using circuit-to-canvas (on copper layers)
+      for (const { canvas, copperLayer } of copperLayers) {
+        if (!canvas) continue
+        drawPcbSmtPadElementsForLayer({
+          canvas,
+          elements,
+          layers: [copperLayer],
+          realToCanvasMat: transform,
+          primitives,
+          drawSoldermask: isShowingSolderMask,
+        })
+      }
+
+      // Draw vias using circuit-to-canvas (on copper layers)
+      for (const { canvas, copperLayer, layer } of copperLayers) {
+        if (!canvas) continue
+        drawPcbViaElementsForLayer({
+          canvas,
+          elements,
+          layers: [copperLayer],
+          realToCanvasMat: transform,
+          primitives,
+          drawSoldermask:
+            isShowingSolderMask && (layer === "top" || layer === "bottom"),
+        })
+      }
+
+      if (isShowingSolderMask) {
+        const soldermaskLayer = selectedLayer === "bottom" ? "bottom" : "top"
+        const drawSoldermaskTop = soldermaskLayer === "top"
+        const drawSoldermaskBottom = soldermaskLayer === "bottom"
+
+        const topSoldermaskCanvas = canvasRefs.current.soldermask_top
+        if (topSoldermaskCanvas && soldermaskLayer === "top") {
+          drawSoldermaskElementsForLayer({
+            canvas: topSoldermaskCanvas,
+            elements,
+            layers: ["top_soldermask"],
+            realToCanvasMat: transform,
+            drawSoldermaskTop,
+            drawSoldermaskBottom,
+            primitives,
+          })
+        }
+
+        const bottomSoldermaskCanvas = canvasRefs.current.soldermask_bottom
+        if (bottomSoldermaskCanvas && soldermaskLayer === "bottom") {
+          drawSoldermaskElementsForLayer({
+            canvas: bottomSoldermaskCanvas,
+            elements,
+            layers: ["bottom_soldermask"],
+            realToCanvasMat: transform,
+            drawSoldermaskTop,
+            drawSoldermaskBottom,
+            primitives,
+          })
+        }
+      }
+
+      // Draw PCB holes
+      const drillCanvas = canvasRefs.current.drill
+      if (drillCanvas) {
+        drawPcbHoleElementsForLayer({
+          canvas: drillCanvas,
+          elements,
+          layers: ["drill"],
+          realToCanvasMat: transform,
+        })
+      }
+
+      // Draw silkscreen if enabled
+      if (isShowingSilkscreen) {
+        const topSilkscreenCanvas = canvasRefs.current.top_silkscreen
+        if (topSilkscreenCanvas) {
+          drawSilkscreenElementsForLayer({
+            canvas: topSilkscreenCanvas,
+            elements,
+            layers: ["top_silkscreen"],
+            realToCanvasMat: transform,
+          })
+        }
+
+        const bottomSilkscreenCanvas = canvasRefs.current.bottom_silkscreen
+        if (bottomSilkscreenCanvas) {
+          drawSilkscreenElementsForLayer({
+            canvas: bottomSilkscreenCanvas,
+            elements,
+            layers: ["bottom_silkscreen"],
+            realToCanvasMat: transform,
+          })
+        }
+      }
+
+      // Draw top fabrication
+      if (isShowingFabricationNotes) {
+        const topFabCanvas = canvasRefs.current.top_fabrication
+        if (topFabCanvas) {
+          drawFabricationNoteElementsForLayer({
+            canvas: topFabCanvas,
+            elements,
+            layers: ["top_fabrication_note"],
+            realToCanvasMat: transform,
+          })
+        }
+
+        // Draw bottom fabrication
+        const bottomFabCanvas = canvasRefs.current.bottom_fabrication
+        if (bottomFabCanvas) {
+          drawFabricationNoteElementsForLayer({
+            canvas: bottomFabCanvas,
+            elements,
+            layers: ["bottom_fabrication_note"],
+            realToCanvasMat: transform,
+          })
+        }
+      }
+
+      if (isShowingPcbNotes) {
+        // Draw bottom notes
+        const bottomNotesCanvas = canvasRefs.current.bottom_notes
+        if (bottomNotesCanvas) {
+          drawPcbNoteElementsForLayer({
+            canvas: bottomNotesCanvas,
+            elements,
+            layers: ["bottom_user_note"],
+            realToCanvasMat: transform,
+          })
+        }
+
+        // Draw top notes
+        const topNotesCanvas = canvasRefs.current.top_notes
+        if (topNotesCanvas) {
+          drawPcbNoteElementsForLayer({
+            canvas: topNotesCanvas,
+            elements,
+            layers: ["top_user_note"],
+            realToCanvasMat: transform,
+          })
+        }
+      }
+
+      // Draw top courtyard
+      if (isShowingCourtyards) {
+        const topCourtyardCanvas = canvasRefs.current.top_courtyard
+        if (topCourtyardCanvas) {
+          drawCourtyardElementsForLayer({
+            canvas: topCourtyardCanvas,
+            elements,
+            layers: ["top_courtyard" as PcbRenderLayer],
+            realToCanvasMat: transform,
+          })
+        }
+
+        // Draw bottom courtyard
+        const bottomCourtyardCanvas = canvasRefs.current.bottom_courtyard
+        if (bottomCourtyardCanvas) {
+          drawCourtyardElementsForLayer({
+            canvas: bottomCourtyardCanvas,
+            elements,
+            layers: ["bottom_courtyard" as PcbRenderLayer],
+            realToCanvasMat: transform,
+          })
+        }
+      }
+
+      // Draw board outline using circuit-to-canvas
+      const boardCanvas = canvasRefs.current.board
+      if (boardCanvas) {
+        drawPcbPanelElements({
+          canvas: boardCanvas,
+          elements,
+          layers: [],
+          realToCanvasMat: transform,
+          drawSoldermask: isShowingSolderMask,
+        })
+        drawPcbBoardElements({
+          canvas: boardCanvas,
+          elements,
+          layers: [],
+          realToCanvasMat: transform,
+          drawSoldermask: isShowingSolderMask,
+        })
+      }
+
+      // Draw PCB cutouts using circuit-to-canvas
+      const edgeCutsCanvas = canvasRefs.current.edge_cuts
+      if (edgeCutsCanvas) {
+        drawPcbCutoutElementsForLayer({
+          canvas: edgeCutsCanvas,
+          elements,
+          layers: ["edge_cuts"],
+          realToCanvasMat: transform,
+        })
+      }
+
+      // Draw keepouts using circuit-to-canvas (on copper layers)
+      for (const { canvas, layer } of copperLayers) {
+        if (!canvas) continue
+        drawPcbKeepoutElementsForLayer({
+          canvas,
+          elements,
+          layer,
+          realToCanvasMat: transform,
+        })
+      }
+    }
+
     drawer.orderAndFadeLayers()
-  }, [primitives, transform, selectedLayer, isShowingSolderMask])
+  }, [
+    primitives,
+    elements,
+    transform,
+    selectedLayer,
+    isShowingCopperPours,
+    isShowingSolderMask,
+    isShowingFabricationNotes,
+    isShowingPcbNotes,
+    isShowingCourtyards,
+    isShowingSilkscreen,
+  ])
 
   return (
     <div
@@ -99,12 +389,10 @@ export const CanvasPrimitiveRenderer = ({
         transform={transform!}
         stringifyCoord={(x, y, z) => `${toMMSI(x, z)}, ${toMMSI(y, z)}`}
       />
-      {orderedLayers
+      {getOrderedCanvasLayers(elements)
         .filter((layer) => {
-          if (!isShowingSolderMask) {
-            // Filter out solder mask layers when disabled
-            return !layer.includes("soldermask")
-          }
+          if (!isShowingSolderMask && layer.includes("soldermask")) return false
+          if (!isShowingSilkscreen && layer.includes("silkscreen")) return false
           return true
         })
         .map((l) => l.replace(/-/g, ""))

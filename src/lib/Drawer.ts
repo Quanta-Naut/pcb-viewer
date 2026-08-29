@@ -1,3 +1,6 @@
+import type { Rotation } from "circuit-json"
+import colorParser from "color"
+import type { BRepShape, Ring } from "lib/types"
 import {
   type Matrix,
   applyToPoint,
@@ -9,9 +12,6 @@ import {
 import colors from "./colors"
 import { scaleOnly } from "./util/scale-only"
 import { zIndexMap } from "./util/z-index-map"
-import { Rotation } from "circuit-json"
-import { BRepShape, Ring } from "lib/types"
-import colorParser from "color"
 
 export interface Aperture {
   shape: "circle" | "square"
@@ -49,6 +49,9 @@ export const LAYER_NAME_TO_COLOR = {
   tkeepout: colors.board.b_crtyd,
   tplace: colors.board.b_silks,
 
+  top_courtyard: colors.board.f_crtyd,
+  bottom_courtyard: colors.board.b_crtyd,
+
   top_silkscreen: colors.board.f_silks,
   bottom_silkscreen: colors.board.b_silks,
 
@@ -60,7 +63,8 @@ export const LAYER_NAME_TO_COLOR = {
   soldermask_with_copper_top: colors.board.soldermaskWithCopper.top,
   soldermask_with_copper_bottom: colors.board.soldermaskWithCopper.bottom,
 
-  notes: colors.board.user_2,
+  bottom_notes: colors.board.user_2,
+  top_notes: colors.board.user_2,
 
   ...(colors.board as any),
 }
@@ -68,21 +72,18 @@ export const LAYER_NAME_TO_COLOR = {
 export type LayerNameForColor = keyof typeof LAYER_NAME_TO_COLOR
 
 export const DEFAULT_DRAW_ORDER = [
-  "inner6",
-  "inner5",
-  "inner4",
-  "inner3",
-  "inner2",
-  "inner1",
+  "board",
   "bottom",
   "soldermask_bottom",
   "bottom_silkscreen",
   "top",
   "soldermask_top",
+  "bottom_courtyard",
+  "bottom_fabrication",
+  "top_courtyard",
+  "top_fabrication",
+  "edge_cuts",
   "top_silkscreen",
-  "soldermask_with_copper_bottom",
-  "soldermask_with_copper_top",
-  "board",
 ] as const
 
 export const FILL_TYPES = {
@@ -110,7 +111,7 @@ export class Drawer {
   // @ts-ignore this.equip({}) handles constructor assignment
   aperture: Aperture
   transform: Matrix
-  foregroundLayer: string = "top"
+  foregroundLayer = "top"
   lastPoint: { x: number; y: number }
 
   constructor(canvasLayerMap: Record<string, HTMLCanvasElement>) {
@@ -154,7 +155,7 @@ export class Drawer {
     width: number,
     height: number,
     spacing: number,
-    angle: number = 45,
+    angle = 45,
   ) {
     const ctx = this.getLayerCtx()
     const [x1, y1] = applyToPoint(this.transform, [x, y])
@@ -168,7 +169,7 @@ export class Drawer {
     const drawLines = (angle: number) => {
       const sin = Math.sin(angle)
       const cos = Math.cos(angle)
-      const diag = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2))
+      const diag = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
       for (let i = -diag; i <= diag; i += spacing$) {
         ctx.beginPath()
@@ -366,7 +367,13 @@ export class Drawer {
     ctx.restore()
   }
 
-  circle(x: number, y: number, r: number, mesh_fill?: boolean) {
+  circle(
+    x: number,
+    y: number,
+    r: number,
+    mesh_fill?: boolean,
+    is_filled = true,
+  ) {
     const r$ = scaleOnly(this.transform, r)
     const [x$, y$] = applyToPoint(this.transform, [x, y])
     this.applyAperture()
@@ -468,7 +475,7 @@ export class Drawer {
     this.applyAperture()
     const ctx = this.getLayerCtx()
 
-    ctx.font = `10px sans-serif`
+    ctx.font = "10px sans-serif"
     ctx.fillText(text, x$, y$)
   }
 
@@ -488,50 +495,81 @@ export class Drawer {
    */
   orderAndFadeLayers() {
     const { canvasLayerMap, foregroundLayer } = this
+    const innerLayers = Object.keys(canvasLayerMap)
+      .filter((layer) => /^inner\d+$/.test(layer))
+      .sort(
+        (a, b) =>
+          Number(b.slice("inner".length)) - Number(a.slice("inner".length)),
+      )
+    const defaultDrawOrder = [
+      "board",
+      ...innerLayers,
+      ...DEFAULT_DRAW_ORDER.filter((layer) => layer !== "board"),
+    ]
+    const associatedSoldermask =
+      foregroundLayer === "top"
+        ? "soldermask_top"
+        : foregroundLayer === "bottom"
+          ? "soldermask_bottom"
+          : undefined
     const associatedSilkscreen =
       foregroundLayer === "top"
         ? "top_silkscreen"
         : foregroundLayer === "bottom"
           ? "bottom_silkscreen"
           : undefined
-
-    // Ensure soldermask-with-copper for the active side is rendered above copper
-    const maskWithCopperLayerForForeground =
+    const associatedNotes =
       foregroundLayer === "top"
-        ? "soldermask_with_copper_top"
+        ? "top_notes"
         : foregroundLayer === "bottom"
-          ? "soldermask_with_copper_bottom"
+          ? "bottom_notes"
+          : undefined
+    const associatedFabrication =
+      foregroundLayer === "top"
+        ? "top_fabrication"
+        : foregroundLayer === "bottom"
+          ? "bottom_fabrication"
+          : undefined
+    const associatedCourtyard =
+      foregroundLayer === "top"
+        ? "top_courtyard"
+        : foregroundLayer === "bottom"
+          ? "bottom_courtyard"
           : undefined
 
     const opaqueLayers = new Set<string>([
       foregroundLayer,
       "drill",
+      "edge_cuts",
       "other",
       "board",
+      ...(associatedSoldermask ? [associatedSoldermask] : []),
       ...(associatedSilkscreen ? [associatedSilkscreen] : []),
-      ...(maskWithCopperLayerForForeground
-        ? [maskWithCopperLayerForForeground]
-        : []),
+      ...(associatedNotes ? [associatedNotes] : []),
+      ...(associatedFabrication ? [associatedFabrication] : []),
+      ...(associatedCourtyard ? [associatedCourtyard] : []),
     ])
 
     const layersToShiftToTop = [
       foregroundLayer,
+      "edge_cuts",
+      ...(associatedSoldermask ? [associatedSoldermask] : []),
       ...(associatedSilkscreen ? [associatedSilkscreen] : []),
-      ...(maskWithCopperLayerForForeground
-        ? [maskWithCopperLayerForForeground]
-        : []),
+      ...(associatedNotes ? [associatedNotes] : []),
+      ...(associatedFabrication ? [associatedFabrication] : []),
+      ...(associatedCourtyard ? [associatedCourtyard] : []),
     ]
 
     const order = [
-      ...DEFAULT_DRAW_ORDER.filter(
-        (l) => !layersToShiftToTop.includes(l as any),
-      ),
-      foregroundLayer,
-      ...(maskWithCopperLayerForForeground
-        ? [maskWithCopperLayerForForeground]
-        : []),
-      "drill",
+      ...defaultDrawOrder.filter((l) => !layersToShiftToTop.includes(l)),
+      ...(foregroundLayer === "drill" ? [] : [foregroundLayer]),
+      ...(associatedSoldermask ? [associatedSoldermask] : []),
+      "edge_cuts",
       ...(associatedSilkscreen ? [associatedSilkscreen] : []),
+      ...(associatedNotes ? [associatedNotes] : []),
+      ...(associatedFabrication ? [associatedFabrication] : []),
+      ...(associatedCourtyard ? [associatedCourtyard] : []),
+      "drill",
     ]
 
     order.forEach((layer, i) => {
@@ -584,7 +622,7 @@ export class Drawer {
     const [x$, y$] = applyToPoint(this.transform, [x, y])
     const { size, shape, mode } = this.aperture
     const size$ = scaleOnly(this.transform, size)
-    let { lastPoint } = this
+    const { lastPoint } = this
     const lastPoint$ = applyToPoint(this.transform, lastPoint)
 
     this.applyAperture()

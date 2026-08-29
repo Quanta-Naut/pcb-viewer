@@ -16,6 +16,7 @@ interface Props {
   transform?: Matrix
   elements: AnyCircuitElement[]
   children: any
+  hoveredComponentIds?: string[]
 }
 
 const GROUP_COLORS = [
@@ -35,15 +36,19 @@ export const PcbGroupOverlay = ({
   children,
   transform = identity(),
   elements = [],
+  hoveredComponentIds = [],
 }: Props) => {
   const [containerRef, { width, height }] = useMeasure<HTMLDivElement>()
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const { is_showing_pcb_groups, pcb_group_view_mode } = useGlobalStore(
-    (s) => ({
-      is_showing_pcb_groups: s.is_showing_pcb_groups,
-      pcb_group_view_mode: s.pcb_group_view_mode,
-    }),
-  )
+  const {
+    is_showing_pcb_groups,
+    pcb_group_view_mode,
+    is_showing_group_anchor_offsets,
+  } = useGlobalStore((s) => ({
+    is_showing_pcb_groups: s.is_showing_pcb_groups,
+    pcb_group_view_mode: s.pcb_group_view_mode,
+    is_showing_group_anchor_offsets: s.is_showing_group_anchor_offsets,
+  }))
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -75,6 +80,10 @@ export const PcbGroupOverlay = ({
     )
 
     const visiblePcbGroups = pcbGroups.filter((group) => {
+      if (group.name?.toLowerCase().includes("subpanel")) {
+        return false
+      }
+
       if (pcb_group_view_mode === "all") return true
       if (!group.source_group_id) return false
       const sourceGroup = sourceGroupById.get(group.source_group_id)
@@ -118,6 +127,16 @@ export const PcbGroupOverlay = ({
       return 1 + getGroupDepthLevel(groupWithParent.parent_source_group_id)
     }
 
+    const hoveredGroupIds = new Set<string>()
+    if (hoveredComponentIds.length > 0) {
+      for (const comp of pcbComponents) {
+        if (!hoveredComponentIds.includes(comp.pcb_component_id)) continue
+        const targetGroupId =
+          comp.positioned_relative_to_pcb_group_id ?? comp.pcb_group_id
+        if (targetGroupId) hoveredGroupIds.add(targetGroupId)
+      }
+    }
+
     visiblePcbGroups.forEach((group, groupIndex) => {
       let groupComponents = pcbComponents.filter(
         (comp) => comp.pcb_group_id === group.pcb_group_id,
@@ -142,32 +161,45 @@ export const PcbGroupOverlay = ({
         }
       }
 
-      if (groupComponents.length === 0) return
+      let minX: number, minY: number, maxX: number, maxY: number
+      let isExplicitlySized = false
 
-      let minX = Infinity
-      let minY = Infinity
-      let maxX = -Infinity
-      let maxY = -Infinity
+      if (group.center && group.width && group.height) {
+        isExplicitlySized = true
+        const halfWidth = group.width / 2
+        const halfHeight = group.height / 2
+        minX = group.center.x - halfWidth
+        maxX = group.center.x + halfWidth
+        minY = group.center.y - halfHeight
+        maxY = group.center.y + halfHeight
+      } else {
+        if (groupComponents.length === 0) return
 
-      groupComponents.forEach((comp) => {
-        if (
-          comp.center &&
-          typeof comp.width === "number" &&
-          typeof comp.height === "number"
-        ) {
-          const left = comp.center.x - comp.width / 2
-          const right = comp.center.x + comp.width / 2
-          const top = comp.center.y + comp.height / 2
-          const bottom = comp.center.y - comp.height / 2
+        minX = Infinity
+        minY = Infinity
+        maxX = -Infinity
+        maxY = -Infinity
 
-          minX = Math.min(minX, left)
-          maxX = Math.max(maxX, right)
-          minY = Math.min(minY, bottom)
-          maxY = Math.max(maxY, top)
-        }
-      })
+        groupComponents.forEach((comp) => {
+          if (
+            comp.center &&
+            typeof comp.width === "number" &&
+            typeof comp.height === "number"
+          ) {
+            const left = comp.center.x - comp.width / 2
+            const right = comp.center.x + comp.width / 2
+            const top = comp.center.y + comp.height / 2
+            const bottom = comp.center.y - comp.height / 2
 
-      if (minX === Infinity || maxX === -Infinity) return
+            minX = Math.min(minX, left)
+            maxX = Math.max(maxX, right)
+            minY = Math.min(minY, bottom)
+            maxY = Math.max(maxY, top)
+          }
+        })
+
+        if (minX === Infinity || maxX === -Infinity) return
+      }
 
       const depthLevel = group.source_group_id
         ? getGroupDepthLevel(group.source_group_id)
@@ -176,14 +208,16 @@ export const PcbGroupOverlay = ({
         ? getAllDescendantSourceGroups(group.source_group_id).length > 0
         : false
 
-      const basePadding = 1
-      const hierarchyPadding = hasChildren ? 0.5 : 0
-      const totalPadding = basePadding + hierarchyPadding
+      if (!isExplicitlySized) {
+        const basePadding = 1
+        const hierarchyPadding = hasChildren ? 0.5 : 0
+        const totalPadding = basePadding + hierarchyPadding
 
-      minX -= totalPadding
-      maxX += totalPadding
-      minY -= totalPadding
-      maxY += totalPadding
+        minX -= totalPadding
+        maxX += totalPadding
+        minY -= totalPadding
+        maxY += totalPadding
+      }
 
       const topLeft = applyToPoint(transform, { x: minX, y: maxY })
       const topRight = applyToPoint(transform, { x: maxX, y: maxY })
@@ -245,9 +279,19 @@ export const PcbGroupOverlay = ({
       ctx.textBaseline = "middle"
       ctx.fillText(labelText, labelX + labelPadding, labelY - labelHeight / 2)
 
-      // Draw anchor position if it exists
-      if (group.anchor_position) {
-        const anchorScreenPos = applyToPoint(transform, group.anchor_position)
+      const shouldShowAnchorMarker =
+        is_showing_group_anchor_offsets &&
+        hoveredGroupIds.has(group.pcb_group_id) &&
+        Boolean(group.anchor_position)
+
+      if (shouldShowAnchorMarker && group.anchor_position) {
+        const anchorPositionValue = Array.isArray(group.anchor_position)
+          ? {
+              x: group.anchor_position[0] ?? 0,
+              y: group.anchor_position[1] ?? 0,
+            }
+          : { x: group.anchor_position.x, y: group.anchor_position.y }
+        const anchorScreenPos = applyToPoint(transform, anchorPositionValue)
 
         // Draw a simple "+" symbol
         ctx.strokeStyle = "white"
@@ -276,6 +320,8 @@ export const PcbGroupOverlay = ({
     height,
     is_showing_pcb_groups,
     pcb_group_view_mode,
+    is_showing_group_anchor_offsets,
+    hoveredComponentIds,
   ])
 
   return (

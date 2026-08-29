@@ -5,14 +5,16 @@ import { ContextProviders } from "./components/ContextProviders"
 import type { StateProps } from "./global-store"
 import type { GraphicsObject } from "graphics-debug"
 import { ToastContainer } from "lib/toast"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useMeasure } from "react-use"
 import { compose, scale, translate } from "transformation-matrix"
 import useMouseMatrixTransform from "use-mouse-matrix-transform"
 import { CanvasElementsRenderer } from "./components/CanvasElementsRenderer"
+import type { BoundsSelection } from "./components/DimensionOverlay"
 import type { ManualEditEvent } from "@tscircuit/props"
 import { zIndexMap } from "lib/util/z-index-map"
 import { calculateCircuitJsonKey } from "lib/calculate-circuit-json-key"
+import { calculateBoardSizeKey } from "lib/calculate-board-size-key"
 
 const defaultTransform = compose(translate(400, 300), scale(40, -40))
 
@@ -23,6 +25,7 @@ type Props = {
   editEvents?: ManualEditEvent[]
   initialState?: Partial<StateProps>
   onEditEventsChanged?: (editEvents: ManualEditEvent[]) => void
+  onBoundsSelected?: (bounds: BoundsSelection) => void
   focusOnHover?: boolean
   clickToInteractEnabled?: boolean
   debugGraphics?: GraphicsObject | null
@@ -37,6 +40,7 @@ export const PCBViewer = ({
   allowEditing = true,
   editEvents: editEventsProp,
   onEditEventsChanged,
+  onBoundsSelected,
   focusOnHover = false,
   clickToInteractEnabled = false,
   disablePcbGroups = false,
@@ -46,6 +50,16 @@ export const PCBViewer = ({
   )
   const [ref, refDimensions] = useMeasure()
   const [transform, setTransformInternal] = useState(defaultTransform)
+  const shouldAllowCanvasInteraction = useCallback(
+    (event: MouseEvent | TouchEvent | WheelEvent) => {
+      const target = event.target
+      if (!(target instanceof Element)) return true
+
+      return !target.closest("[data-toolbar-overlay]")
+    },
+    [],
+  )
+
   const {
     ref: transformRef,
     setTransform,
@@ -54,6 +68,7 @@ export const PCBViewer = ({
     transform,
     onSetTransform: setTransformInternal,
     enabled: isInteractionEnabled,
+    shouldDrag: shouldAllowCanvasInteraction,
   })
 
   let [editEvents, setEditEvents] = useState<ManualEditEvent[]>([])
@@ -65,6 +80,7 @@ export const PCBViewer = ({
     () => calculateCircuitJsonKey(circuitJson),
     [circuitJson],
   )
+  const boardSizeKey = calculateBoardSizeKey(circuitJson)
 
   const resetTransform = () => {
     const elmBounds =
@@ -103,6 +119,12 @@ export const PCBViewer = ({
       initialRenderCompleted.current = true
     }
   }, [circuitJson, refDimensions])
+
+  useEffect(() => {
+    if (initialRenderCompleted.current === true) {
+      resetTransform()
+    }
+  }, [boardSizeKey])
 
   const pcbElmsPreEdit = useMemo(() => {
     return (
@@ -155,10 +177,12 @@ export const PCBViewer = ({
           <CanvasElementsRenderer
             key={refDimensions.width}
             transform={transform}
+            setTransform={setTransform}
             height={height}
             width={refDimensions.width}
             allowEditing={allowEditing}
             focusOnHover={focusOnHover}
+            onBoundsSelected={onBoundsSelected}
             cancelPanDrag={cancelPanDrag}
             onCreateEditEvent={onCreateEditEvent}
             onModifyEditEvent={onModifyEditEvent}
